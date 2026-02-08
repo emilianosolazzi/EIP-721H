@@ -1,9 +1,9 @@
 ---
-eip: XXXX
+eip: XXXX  (number TBD)
 title: ERC-721H — Historical Ownership Extension for ERC-721
 description: An extension to ERC-721 that preserves complete, on-chain ownership history through a three-layer model.
 author: Emiliano Solazzi 
-discussions-to: https://ethereum-magicians.org/t/erc-721h-historical-ownership-tracking/XXXX
+discussions-to: https://ethereum-magicians.org/t/erc-721h-historical-ownership-tracking/XXXX  (number TBD)
 status: Draft
 type: Standards Track
 category: ERC
