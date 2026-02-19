@@ -103,6 +103,11 @@ interface IERC721H {
     /// @notice Returns `true` if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
 
+    /// @notice Returns the owner of `tokenId` at the specified block `timestamp`.
+    /// @dev Returns address(0) if no owner was recorded at that exact timestamp.
+    ///      Used for Sybil-resistant timestamp-based queries.
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external view returns (address);
+
     // ──────────────────────────────────────────────
     //  Layer 3 — Current Authority (supplements ERC-721)
     // ──────────────────────────────────────────────
