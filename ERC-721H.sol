@@ -31,15 +31,17 @@ import {IERC721H} from "./IERC721H.sol";
  * - Gaming: Show "veteran" status based on original mint, not current ownership
  * 
  * GAS COSTS:
- * - Mint: ~80,000 gas (standard: ~50,000) +60% for historical tracking
- * - Transfer: ~90,000 gas (standard: ~50,000) +80% for history append
+ * - Mint: ~332,000 gas (standard: ~50,000) +564% for 3-layer init + dual Sybil guards
+ * - Transfer: ~170,000 gas (standard: ~50,000) +240% for history append + Sybil guards
+ * - Burn: ~10,000 gas (standard: ~30,000) -67% — skips refunds, preserves history
  * - Read history: Free (view function)
  * 
- * TRADE-OFF: Slightly higher gas for PERMANENT on-chain history
+ * TRADE-OFF: Higher write gas for PERMANENT on-chain provenance with dual Sybil protection.
+ *            On L2s (Arbitrum, Base, Optimism) where gas is 10-100x cheaper, this is negligible.
  * 
  * @custom:version 1.0.0
  */
-contract ERC721H is IERC721H {
+    contract ERC721H is IERC721H { 
     // ==========================================
     // ERRORS
     // ==========================================
@@ -50,6 +52,8 @@ contract ERC721H is IERC721H {
     error ZeroAddress();
     error InvalidRecipient();
     error NotApprovedOrOwner();
+    error TokenAlreadyTransferredThisTx();
+    error OwnerAlreadyRecordedForTimestamp();
     
     // ==========================================
     // EVENTS (ERC-721 Compatible)
@@ -106,6 +110,12 @@ contract ERC721H is IERC721H {
     /// @notice Tokens originally created by each address (set once at mint)
     /// @dev Dedicated array avoids O(n) filtering in getOriginallyCreatedTokens()
     mapping(address => uint256[]) private _createdTokens;
+
+    /// @notice Enforces ONE recognized owner per token per block timestamp
+    /// @dev Prevents inter-TX same-block Sybil attacks. External contracts can query
+    ///      getOwnerAtTimestamp() to verify unambiguous ownership at any past block.
+    ///      Complements oneTransferPerTokenPerTx (intra-TX) with inter-TX protection.
+    mapping(uint256 => mapping(uint256 => address)) private _ownerAtTimestamp;
     
     // ==========================================
     // LAYER 3: CURRENT AUTHORITY (Standard ERC-721)
@@ -150,6 +160,24 @@ contract ERC721H is IERC721H {
         _locked = true;
         _;
         _locked = false;
+    }
+
+    /// @notice Prevents the SAME token from being transferred more than once per transaction
+    /// @dev Uses EIP-1153 transient storage (Cancun+). Each tokenId gets its own tstore slot.
+    ///      Blocks Sybil chains (A→B→C→D in one TX) that pollute Layer 2 ownership history.
+    ///      Different tokens can still transfer freely in the same TX (batch-safe).
+    ///      Transient storage is auto-cleared by the EVM at end of transaction — zero permanent cost.
+             modifier oneTransferPerTokenPerTx(uint256 tokenId) {
+              assembly {
+            let flag := tload(tokenId)
+            if eq(flag, 1) {
+                let ptr := mload(0x40)
+                mstore(ptr, shl(224, 0x96817234)) // TokenAlreadyTransferredThisTx()
+                revert(ptr, 4)
+            }
+            tstore(tokenId, 1)
+        }
+        _;
     }
     
     // ==========================================
@@ -241,6 +269,7 @@ contract ERC721H is IERC721H {
         _ownershipTimestamps[tokenId].push(block.timestamp);
         _everOwnedTokens[to].push(tokenId);
         _hasOwnedToken[tokenId][to] = true;
+        _ownerAtTimestamp[tokenId][block.timestamp] = to;
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Set current owner (standard ERC-721)
@@ -252,9 +281,9 @@ contract ERC721H is IERC721H {
         return tokenId;
     }
     
-    // ==========================================
+    // +++++++++++++++++++++++++++++++++++++++++++++++++
     // TRANSFER (Updates Layer 2 & 3, preserves Layer 1)
-    // ==========================================
+    // +++++++++++++++++++++++++++++++++++++++++++++++++
     
     /**
      * @notice Internal transfer that maintains historical records
@@ -262,7 +291,7 @@ contract ERC721H is IERC721H {
      *      Layer 2: Append new owner to history (append-only)
      *      Layer 3: Update current owner (standard ERC-721)
      */
-    function _transfer(address from, address to, uint256 tokenId) internal nonReentrant {
+    function _transfer(address from, address to, uint256 tokenId) internal nonReentrant oneTransferPerTokenPerTx(tokenId) {
         if (ownerOf(tokenId) != from) revert NotAuthorized();
         if (to == address(0)) revert ZeroAddress();
         
@@ -271,6 +300,12 @@ contract ERC721H is IERC721H {
         
         // LAYER 1: originalCreator[tokenId] remains UNCHANGED (immutable!)
         
+        // SYBIL GUARD: One owner per token per block timestamp (inter-TX protection)
+        if (_ownerAtTimestamp[tokenId][block.timestamp] != address(0)) {
+            revert OwnerAlreadyRecordedForTimestamp();
+        }
+        _ownerAtTimestamp[tokenId][block.timestamp] = to;
+
         // LAYER 2: APPEND to ownership history (never remove old entries)
         _ownershipHistory[tokenId].push(to);
         _ownershipTimestamps[tokenId].push(block.timestamp);
@@ -289,9 +324,9 @@ contract ERC721H is IERC721H {
         emit Transfer(from, to, tokenId);
     }
     
-    // ==========================================
+    // +++++++++++++++++++++++++++++++++++++++++++++++++
     // HISTORICAL QUERY FUNCTIONS (The Innovation!)
-    // ==========================================
+    // +++++++++++++++++++++++++++++++++++++++++++++++++
     
     /**
      * @notice Check if address was the ORIGINAL creator/minter
@@ -327,7 +362,7 @@ contract ERC721H is IERC721H {
         address[] memory owners,
         uint256[] memory timestamps
     ) {
-        if (_currentOwner[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
         return (_ownershipHistory[tokenId], _ownershipTimestamps[tokenId]);
     }
     
@@ -336,7 +371,7 @@ contract ERC721H is IERC721H {
      * @dev length - 1 because first entry is mint, not transfer
      */
     function getTransferCount(uint256 tokenId) public view returns (uint256) {
-        if (_currentOwner[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
         return _ownershipHistory[tokenId].length - 1;
     }
     
@@ -370,6 +405,19 @@ contract ERC721H is IERC721H {
         }
         return false;
     }
+
+    /**
+     * @notice Get the recognized owner of a token at a specific block timestamp
+     * @dev Returns address(0) if no ownership was recorded at that timestamp.
+     *      External contracts (DAOs, airdrops, reward logic) can use this to verify
+     *      unambiguous ownership: one token, one block, one owner.
+     * @param tokenId The token to query
+     * @param timestamp The block.timestamp to check
+     * @return The single recognized owner at that timestamp, or address(0)
+     */
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) public view returns (address) {
+        return _ownerAtTimestamp[tokenId][timestamp];
+    }
     
     // ==========================================
     // PROVENANCE REPORT
@@ -387,7 +435,7 @@ contract ERC721H is IERC721H {
         address[] memory allOwners,
         uint256[] memory transferTimestamps
     ) {
-        if (_currentOwner[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
         
         return (
             originalCreator[tokenId],
