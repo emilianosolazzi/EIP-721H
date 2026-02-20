@@ -113,7 +113,10 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 | `getOwnershipHistory(tokenId)` | `(address[], uint256[])` — owners + timestamps | Free |
 | `getTransferCount(tokenId)` | `uint256` — number of transfers | Free |
 | `getEverOwnedTokens(account)` | `uint256[]` — all tokens ever held (deduplicated) | Free |
-| `getOwnerAtTimestamp(tokenId, timestamp)` | `address` — owner at specific timestamp (Sybil-resistant) | Free |
+| `getOwnerAtBlock(tokenId, blockNumber)` | `address` — owner at specific block number (Sybil-resistant) | Free |
+| `getOwnerAtTimestamp(tokenId, timestamp)` | **DEPRECATED** — always returns `address(0)`. Use `getOwnerAtBlock`. | Free |
+| `getHistoryLength(tokenId)` | `uint256` — entries in ownership history | Free |
+| `getHistorySlice(tokenId, start, count)` | `(address[], uint256[])` — paginated slice (anti-griefing) | Free |
 
 ### Layer 3 — Current Authority (ERC-721 Compatible)
 
@@ -131,7 +134,8 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 | Function | Returns | Gas |
 |:---------|:--------|:----|
 | `getProvenanceReport(tokenId)` | Full report (creator, block, owner, transfers, history) | Free |
-| `totalSupply()` | `uint256` | Free |
+| `totalSupply()` | `uint256` — active tokens (excludes burned) | Free |
+| `totalMinted()` | `uint256` — all-time minted (includes burned) | Free |
 
 ### Lifecycle
 
@@ -145,8 +149,8 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 
 | Operation | ERC-721 | ERC-721H | Overhead | Why |
 |:----------|:--------|:---------|:---------|:----|
-| Mint | ~50,000 | ~332,000 | +564% | 3 layers + Sybil guards (transient + timestamp) + history |
-| Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup |
+| Mint | ~50,000 | ~332,000 | +564% | 3 layers + Sybil guards (EIP-1153 transient + block.number) + history |
+| Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, block) + Sybil guards + dedup |
 | Burn | ~30,000 | ~10,000 | -67% | Skips refunds — Layer 1 & 2 preserved |
 | Read | Free | Free | — | All queries are `view` |
 
@@ -154,22 +158,24 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 
 ## Security
 
-- **Reentrancy**: `_transfer()` uses `nonReentrant` modifier. All state mutations complete before external calls.
+- **Reentrancy**: `_transfer()` uses `nonReentrant` modifier with dedicated `Reentrancy()` error. All state mutations complete before external calls.
 - **Access Control**: `mint()` restricted to `onlyOwner`. `burn()` restricted to token owner or approved.
 - **O(1) Lookups**: `hasEverOwned()` uses a dedicated mapping — no unbounded iteration.
 - **Deduplication**: `_everOwnedTokens` deduped via `_hasOwnedToken` — wash trading cannot bloat per-address lists.
+- **Self-Transfer Prevention**: `from == to` reverts with `InvalidRecipient()` — blocks history pollution without real ownership change.
+- **Burn Semantics**: `totalSupply()` decrements on burn; `totalMinted()` does not. `HistoricalTokenBurned` event signals Layer-3-only deletion to indexers.
 - **Sybil Protection (Dual-Layer)**:
   - **Intra-TX**: `oneTransferPerTokenPerTx` modifier using EIP-1153 transient storage blocks A→B→C→D chains within one transaction
-  - **Inter-TX**: `ownerAtTimestamp` mapping enforces one owner per token per block timestamp across separate transactions
+  - **Inter-TX**: `_ownerAtBlock` mapping enforces one owner per token per block number across separate transactions (`block.number`, not `block.timestamp`, to prevent validator manipulation)
 - **ERC-165**: `supportsInterface()` returns `true` for ERC-165, ERC-721, ERC-721 Metadata, and IERC721H.
 
 ## Repository Structure
 
 ```
 
-1. **Interface**: `IERC721H.sol` — 13 functions, 2 events
-2. **Reference Implementation**: `ERC-721H.sol` — fully functional, zero compiler warnings
-3. **EIP Document**: `EIP-721H.md` — Preamble, Abstract, Motivation, Specification (16 behavioral requirements), Rationale, Backwards Compatibility, Reference Implementation, Security Considerations
+1. **Interface**: `IERC721H.sol` — 17 functions, 3 events
+2. **Reference Implementation**: `ERC-721H.sol` — v1.2.0, fully functional (1 intentional warning: unused parameter in deprecated `getOwnerAtTimestamp`)
+3. **EIP Document**: `EIP-721H.md` — Preamble, Abstract, Motivation, Specification (21 behavioral requirements), Rationale, Backwards Compatibility, Reference Implementation, Security Considerations
 4. **Status**: Draft
 5. **Category**: Standards Track → ERC
 6. **Requires**: EIP-165, EIP-721
