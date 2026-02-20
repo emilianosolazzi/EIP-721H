@@ -147,7 +147,7 @@ contract ERC721H_FullTest is Test {
 
     function test_TransferFrom() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.approve(address(this), tokenId);
@@ -161,7 +161,7 @@ contract ERC721H_FullTest is Test {
 
     function test_TransferPreservesOriginalCreator() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.approve(address(this), tokenId);
@@ -174,7 +174,7 @@ contract ERC721H_FullTest is Test {
 
     function test_TransferAppendsToOwnershipHistory() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.approve(address(this), tokenId);
@@ -189,7 +189,7 @@ contract ERC721H_FullTest is Test {
 
     function test_TransferUpdatesHasEverOwned() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.approve(address(this), tokenId);
@@ -202,7 +202,7 @@ contract ERC721H_FullTest is Test {
 
     function test_TransferClearsApproval() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.approve(bob, tokenId);
@@ -277,7 +277,7 @@ contract ERC721H_FullTest is Test {
 
     function test_OperatorCanTransfer() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.setApprovalForAll(bob, true);
@@ -306,7 +306,7 @@ contract ERC721H_FullTest is Test {
 
     function test_SafeTransferToEOA() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.safeTransferFrom(alice, bob, tokenId);
@@ -316,7 +316,7 @@ contract ERC721H_FullTest is Test {
 
     function test_SafeTransferToReceiver() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.safeTransferFrom(alice, address(receiver), tokenId);
@@ -326,7 +326,7 @@ contract ERC721H_FullTest is Test {
 
     function test_SafeTransferToRevertingReceiver_Reverts() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         receiver.setShouldRevert(true);
 
         vm.prank(alice);
@@ -336,7 +336,7 @@ contract ERC721H_FullTest is Test {
 
     function test_SafeTransferToWrongReturnValue_Reverts() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         receiver.setReturnWrongValue(true);
 
         vm.prank(alice);
@@ -357,7 +357,7 @@ contract ERC721H_FullTest is Test {
 
     function test_GetTransferCount_OneAfterTransfer() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -374,7 +374,7 @@ contract ERC721H_FullTest is Test {
 
     function test_IsCurrentOwner_AfterTransfer() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -385,7 +385,7 @@ contract ERC721H_FullTest is Test {
 
     function test_GetEverOwnedTokensAfterTransfer() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -401,7 +401,7 @@ contract ERC721H_FullTest is Test {
 
     function test_HasEverOwned_Deduplication() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -419,7 +419,7 @@ contract ERC721H_FullTest is Test {
 
     function test_GetProvenanceReport() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -480,6 +480,8 @@ contract ERC721H_FullTest is Test {
         nft.burn(tokenId);
 
         assertEq(nft.balanceOf(alice), 0);
+        assertEq(nft.totalSupply(), 0, "totalSupply should exclude burned tokens");
+        assertEq(nft.totalMinted(), 1, "totalMinted should include burned tokens");
 
         vm.expectRevert(ERC721H.TokenDoesNotExist.selector);
         nft.ownerOf(tokenId);
@@ -601,7 +603,7 @@ contract ERC721H_FullTest is Test {
 
     function test_OwnerCanTransferDirectly() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -615,7 +617,7 @@ contract ERC721H_FullTest is Test {
 
     function test_SameTokenTwiceInOneTx_Reverts() public {
         uint256 tokenId = nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
@@ -629,7 +631,7 @@ contract ERC721H_FullTest is Test {
     function test_DifferentTokensSameTx_OK() public {
         uint256 token1 = nft.mint(alice);
         uint256 token2 = nft.mint(bob);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, charlie, token1);
@@ -649,29 +651,29 @@ contract ERC721H_FullTest is Test {
     function test_OwnerAtTimestamp_RecordedOnMint() public {
         uint256 tokenId = nft.mint(alice);
 
-        assertEq(nft.getOwnerAtTimestamp(tokenId, block.timestamp), alice);
+        assertEq(nft.getOwnerAtBlock(tokenId, block.number), alice);
     }
 
     function test_OwnerAtTimestamp_RecordedOnTransfer() public {
         uint256 tokenId = nft.mint(alice);
 
-        vm.warp(block.timestamp + 100); // new block
+        vm.roll(block.number + 1); // new block
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
 
-        assertEq(nft.getOwnerAtTimestamp(tokenId, block.timestamp), bob);
+        assertEq(nft.getOwnerAtBlock(tokenId, block.number), bob);
     }
 
     function test_OwnerAtTimestamp_SameBlockSecondTx_Reverts() public {
         uint256 tokenId = nft.mint(alice);
 
-        // Transfer 1: alice → bob at new timestamp
-        vm.warp(block.timestamp + 100);
+        // Transfer 1: alice → bob at new block
+        vm.roll(block.number + 1);
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
 
-        // Transfer 2: bob → charlie at SAME timestamp, SAME TX
-        // tstore guard fires FIRST (intra-TX), before ownerAtTimestamp (inter-TX)
+        // Transfer 2: bob → charlie at SAME block, SAME TX
+        // tstore guard fires FIRST (intra-TX), before ownerAtBlock (inter-TX)
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(bytes4(0x96817234))); // TokenAlreadyTransferredThisTx
         nft.transferFrom(bob, charlie, tokenId);
@@ -679,26 +681,26 @@ contract ERC721H_FullTest is Test {
 
     function test_OwnerAtTimestamp_DifferentBlock_FirstHop() public {
         uint256 tokenId = nft.mint(alice);
-        uint256 mintTime = block.timestamp;
+        uint256 mintBlock = block.number;
 
         // Block 2: alice → bob
-        vm.warp(block.timestamp + 100);
+        vm.roll(block.number + 1);
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
-        uint256 transferTime = block.timestamp;
+        uint256 transferBlock = block.number;
 
         assertEq(nft.ownerOf(tokenId), bob);
-        assertEq(nft.getOwnerAtTimestamp(tokenId, mintTime), alice);
-        assertEq(nft.getOwnerAtTimestamp(tokenId, transferTime), bob);
+        assertEq(nft.getOwnerAtBlock(tokenId, mintBlock), alice);
+        assertEq(nft.getOwnerAtBlock(tokenId, transferBlock), bob);
         assertEq(nft.getTransferCount(tokenId), 1);
     }
 
     function test_OwnerAtTimestamp_DifferentBlock_SecondHop() public {
-        // Proves a second transfer at a DIFFERENT timestamp works
+        // Proves a second transfer at a DIFFERENT block works
         // (separate test function = fresh tstore context)
         uint256 tokenId = nft.mint(alice);
 
-        vm.warp(block.timestamp + 100);
+        vm.roll(block.number + 1);
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
         // In a real chain, bob → charlie would be a separate TX at a later block.
@@ -710,7 +712,7 @@ contract ERC721H_FullTest is Test {
         uint256 token1 = nft.mint(alice);
         uint256 token2 = nft.mint(bob);
 
-        vm.warp(block.timestamp + 100);
+        vm.roll(block.number + 1);
 
         vm.prank(alice);
         nft.transferFrom(alice, charlie, token1);
@@ -718,25 +720,25 @@ contract ERC721H_FullTest is Test {
         vm.prank(bob);
         nft.transferFrom(bob, charlie, token2);
 
-        // Both succeed — different tokens, same timestamp is fine
-        assertEq(nft.getOwnerAtTimestamp(token1, block.timestamp), charlie);
-        assertEq(nft.getOwnerAtTimestamp(token2, block.timestamp), charlie);
+        // Both succeed — different tokens, same block is fine
+        assertEq(nft.getOwnerAtBlock(token1, block.number), charlie);
+        assertEq(nft.getOwnerAtBlock(token2, block.number), charlie);
     }
 
     function test_OwnerAtTimestamp_QueryPastTimestamp() public {
         uint256 tokenId = nft.mint(alice);
-        uint256 mintTime = block.timestamp;
+        uint256 mintBlockNum = block.number;
 
-        vm.warp(block.timestamp + 100);
+        vm.roll(block.number + 100);
         vm.prank(alice);
         nft.transferFrom(alice, bob, tokenId);
-        uint256 transferTime = block.timestamp;
+        uint256 transferBlockNum = block.number;
 
-        // Query historical: who owned at mint time?
-        assertEq(nft.getOwnerAtTimestamp(tokenId, mintTime), alice);
-        // Query historical: who owned at transfer time?
-        assertEq(nft.getOwnerAtTimestamp(tokenId, transferTime), bob);
-        // Query non-existent timestamp
-        assertEq(nft.getOwnerAtTimestamp(tokenId, mintTime + 50), address(0));
+        // Query historical: who owned at mint block?
+        assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum), alice);
+        // Query historical: who owned at transfer block?
+        assertEq(nft.getOwnerAtBlock(tokenId, transferBlockNum), bob);
+        // Query non-existent block
+        assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum + 50), address(0));
     }
 }
