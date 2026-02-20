@@ -125,6 +125,114 @@ contract ERC721H_FullTest is Test {
         assertEq(allOwners.length, 1);
         assertEq(transferTimestamps.length, 1);
     }
+
+    // ── Missing Coverage: Inter-TX Sybil Guard ────────
+    // Tests the _ownerAtBlock logic (separate from transient storage guard).
+    // Mint sets _ownerAtBlock at block N; transfer at same block N must revert.
+    function testInterTxSybilGuardReverts() public {
+        vm.prank(owner);
+        uint256 tokenId = nft.mint(user1);
+
+        // Same block as mint — _ownerAtBlock[tokenId][block.number] already set
+        vm.prank(user1);
+        vm.expectRevert(ERC721H.OwnerAlreadyRecordedForBlock.selector);
+        nft.transferFrom(user1, user2, tokenId);
+    }
+
+    // ── Missing Coverage: Self-Transfer Rejection ─────
+    // Spec MUST: from == to reverts with InvalidRecipient
+    function testSelfTransferReverts() public {
+        vm.prank(owner);
+        uint256 tokenId = nft.mint(user1);
+
+        vm.roll(block.number + 1);
+        vm.prank(user1);
+        vm.expectRevert(ERC721H.InvalidRecipient.selector);
+        nft.transferFrom(user1, user1, tokenId);
+    }
+
+    // ── Missing Coverage: Approval Cleared After Transfer ─
+    // ERC-721 compliance: approval MUST be cleared on transfer
+    function testApprovalClearedAfterTransfer() public {
+        vm.prank(owner);
+        uint256 tokenId = nft.mint(user1);
+
+        vm.prank(user1);
+        nft.approve(user3, tokenId);
+        assertEq(nft.getApproved(tokenId), user3);
+
+        vm.roll(block.number + 1);
+        vm.prank(user1);
+        nft.transferFrom(user1, user2, tokenId);
+
+        // Approval must be zero after transfer
+        assertEq(nft.getApproved(tokenId), address(0));
+    }
+
+    // ── Missing Coverage: Negative Queries (Nonexistent Token) ─
+    function testOwnerOfNonexistentReverts() public {
+        vm.expectRevert(ERC721H.TokenDoesNotExist.selector);
+        nft.ownerOf(999);
+    }
+
+    function testProvenanceReportNonexistentReverts() public {
+        vm.expectRevert(ERC721H.TokenDoesNotExist.selector);
+        nft.getProvenanceReport(999);
+    }
+
+    function testHistoryLengthNonexistentReverts() public {
+        vm.expectRevert(ERC721H.TokenDoesNotExist.selector);
+        nft.getHistoryLength(999);
+    }
+
+    function testHistorySliceNonexistentReverts() public {
+        vm.expectRevert(ERC721H.TokenDoesNotExist.selector);
+        nft.getHistorySlice(999, 0, 10);
+    }
+
+    // ── Missing Coverage: Pagination Slice ────────────
+    // Validates getHistoryLength + getHistorySlice bounded reads.
+    // Note: Only 1 transfer per tokenId per test function (Foundry test = 1 TX,
+    //       transient storage persists). 2 entries is sufficient to validate
+    //       all pagination edge cases: partial page, exact page, out-of-bounds.
+    function testPaginationSlice() public {
+        vm.prank(owner);
+        uint256 tokenId = nft.mint(user1);
+
+        vm.roll(block.number + 1);
+        vm.prank(user1);
+        nft.transferFrom(user1, user2, tokenId);
+
+        // History: [user1, user2]
+        assertEq(nft.getHistoryLength(tokenId), 2);
+
+        // Full page: start=0, count=2
+        (address[] memory full, uint256[] memory fullTs) = nft.getHistorySlice(tokenId, 0, 2);
+        assertEq(full.length, 2);
+        assertEq(full[0], user1);
+        assertEq(full[1], user2);
+        assertEq(fullTs.length, 2);
+
+        // First entry only: start=0, count=1
+        (address[] memory page1, ) = nft.getHistorySlice(tokenId, 0, 1);
+        assertEq(page1.length, 1);
+        assertEq(page1[0], user1);
+
+        // Second entry only: start=1, count=1
+        (address[] memory page2, ) = nft.getHistorySlice(tokenId, 1, 1);
+        assertEq(page2.length, 1);
+        assertEq(page2[0], user2);
+
+        // Count exceeds remaining: clamped to actual length
+        (address[] memory clamped, ) = nft.getHistorySlice(tokenId, 1, 100);
+        assertEq(clamped.length, 1);
+        assertEq(clamped[0], user2);
+
+        // Out-of-bounds start: empty arrays
+        (address[] memory empty, uint256[] memory emptyTs) = nft.getHistorySlice(tokenId, 10, 5);
+        assertEq(empty.length, 0);
+        assertEq(emptyTs.length, 0);
+    }
 }
 
 contract SybilAttacker {
