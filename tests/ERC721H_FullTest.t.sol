@@ -46,7 +46,7 @@ contract ERC721H_FullTest is Test {
         uint256 tokenId = nft.mint(user1);
 
         // First transfer: User1 to User2
-        vm.warp(block.timestamp + 1 hours);
+        vm.roll(block.number + 1);
         vm.prank(user1);
         nft.transferFrom(user1, user2, tokenId);
 
@@ -77,7 +77,7 @@ contract ERC721H_FullTest is Test {
         vm.prank(owner);
         uint256 tokenId = nft.mint(user1);
         
-        vm.warp(block.timestamp + 1 hours);
+        vm.roll(block.number + 1);
         vm.prank(user1);
         nft.transferFrom(user1, user2, tokenId);
 
