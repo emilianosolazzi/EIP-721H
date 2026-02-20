@@ -59,6 +59,12 @@ interface IERC721H {
         address indexed creator
     );
 
+    /// @notice Emitted when a token is burned (Layer 3 cleared, Layer 1 & 2 preserved).
+    /// @dev Signals to indexers that this is a Layer-3-only deletion, not full destruction.
+    ///      After this event, ownerOf() will revert but getOwnershipHistory() still works.
+    /// @param tokenId The token that was burned.
+    event HistoricalTokenBurned(uint256 indexed tokenId);
+
     // ──────────────────────────────────────────────
     //  Layer 1 — Immutable Origin
     // ──────────────────────────────────────────────
@@ -103,10 +109,15 @@ interface IERC721H {
     /// @notice Returns `true` if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
 
-    /// @notice Returns the owner of `tokenId` at the specified block `timestamp`.
-    /// @dev Returns address(0) if no owner was recorded at that exact timestamp.
-    ///      Used for Sybil-resistant timestamp-based queries.
-    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external view returns (address);
+    /// @notice Returns the recognized owner of `tokenId` at a specific `blockNumber`.
+    /// @dev Returns address(0) if no ownership was recorded at that block.
+    ///      Used for Sybil-resistant block-number-based queries.
+    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
+    function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) external view returns (address);
+
+    /// @notice DEPRECATED: Use getOwnerAtBlock() instead.
+    /// @dev Always returns address(0). Kept for backwards compatibility.
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external pure returns (address);
 
     // ──────────────────────────────────────────────
     //  Layer 3 — Current Authority (supplements ERC-721)
@@ -114,6 +125,22 @@ interface IERC721H {
 
     /// @notice Returns `true` if `account` is the current owner of `tokenId`.
     function isCurrentOwner(uint256 tokenId, address account) external view returns (bool);
+
+    // ──────────────────────────────────────────────
+    //  Pagination Helpers (Anti-Griefing)
+    // ──────────────────────────────────────────────
+
+    /// @notice Returns the total number of entries in `tokenId`'s ownership history.
+    function getHistoryLength(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of ownership history.
+    /// @param tokenId The token to query.
+    /// @param start   Zero-based start index.
+    /// @param count   Maximum entries to return.
+    /// @return owners     Slice of owner addresses.
+    /// @return timestamps Parallel slice of block timestamps.
+    function getHistorySlice(uint256 tokenId, uint256 start, uint256 count)
+        external view returns (address[] memory owners, uint256[] memory timestamps);
 
     // ──────────────────────────────────────────────
     //  Aggregate Queries
@@ -132,8 +159,11 @@ interface IERC721H {
             uint256[] memory transferTimestamps
         );
 
-    /// @notice Returns the total number of tokens currently in existence.
+    /// @notice Returns the total number of tokens currently in existence (excludes burned).
     function totalSupply() external view returns (uint256);
+
+    /// @notice Returns the total number of tokens ever minted (includes burned).
+    function totalMinted() external view returns (uint256);
 
     // ──────────────────────────────────────────────
     //  Lifecycle
