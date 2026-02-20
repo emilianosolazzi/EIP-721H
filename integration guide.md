@@ -10,7 +10,7 @@ const signer   = await provider.getSigner();
 const nft      = new ethers.Contract(NFT_ADDRESS, ERC721H_ABI, signer);
 
 // ── Mint ──────────────────────────────────────────────
-const tx = await nft.mint(await signer.getAddress(), "ipfs://Qm.../metadata.json");
+const tx = await nft.mint(await signer.getAddress());
 const rc = await tx.wait();
 const tokenId = rc.logs[0].args.tokenId;          // BigInt
 console.log("Minted token", tokenId.toString());
@@ -22,11 +22,11 @@ await (await nft.transferFrom(bob, charlie, tokenId)).wait();
 
 // ── Read Three-Layer Model ────────────────────────────
 const creator = await nft.originalCreator(tokenId);     // Layer 1 – immutable
-const history = await nft.getOwnershipHistory(tokenId);  // Layer 2 – append-only
+const [owners, timestamps] = await nft.getOwnershipHistory(tokenId); // Layer 2 – [addresses], [timestamps]
 const current = await nft.ownerOf(tokenId);              // Layer 3 – current
 
 // ── Provenance Check ──────────────────────────────────
-const wasFounder = await nft.hasEverOwned(founder, tokenId);  // O(1) lookup
+const wasFounder = await nft.hasEverOwned(tokenId, founder);  // O(1) lookup
 const minted     = await nft.getOriginallyCreatedTokens(alice);
 
 // ── Collection Stats ──────────────────────────────────
@@ -72,27 +72,39 @@ await (await nft.burn(tokenId)).wait();
 | Reentrancy protection            | Varies           | Built-in (`nonReentrant`) |
 | Access-controlled mint           | Varies           | `onlyOwner`           |
 | Burn support                     | Varies           | Yes (owner/approved)  |
+| Sybil protection                 | No               | Yes (dual-layer: tstore + timestamp) |
 | `totalSupply()`                  | No (ERC-721Enum) | Yes (built-in)        |
 
 ## 4. Key ABI Snippet
 
 ```json
 [
-  "function mint(address to, string uri) external",
+  "function mint(address to) external returns (uint256)",
   "function burn(uint256 tokenId) external",
   "function transferFrom(address from, address to, uint256 tokenId) external",
-  "function originalCreator(uint256 tokenId) view returns (address)",
-  "function getOwnershipHistory(uint256 tokenId) view returns (address[])",
-  "function hasEverOwned(address addr, uint256 tokenId) view returns (bool)",
-  "function getOriginallyCreatedTokens(address creator) view returns (uint256[])",
-  "function totalSupply() view returns (uint256)",
-  "function ownerOf(uint256 tokenId) view returns (address)",
-  "function balanceOf(address account) view returns (uint256)",
-  "function tokenURI(uint256 tokenId) view returns (string)",
+  "function safeTransferFrom(address from, address to, uint256 tokenId) external",
+  "function safeTransferFrom(address from, address to, uint256 tokenId, bytes data) external",
   "function approve(address to, uint256 tokenId) external",
   "function setApprovalForAll(address operator, bool approved) external",
   "function getApproved(uint256 tokenId) view returns (address)",
-  "function isApprovedForAll(address account, address operator) view returns (bool)"
+  "function isApprovedForAll(address account, address operator) view returns (bool)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
+  "function originalCreator(uint256 tokenId) view returns (address)",
+  "function mintBlock(uint256 tokenId) view returns (uint256)",
+  "function isOriginalOwner(uint256 tokenId, address account) view returns (bool)",
+  "function isCurrentOwner(uint256 tokenId, address account) view returns (bool)",
+  "function hasEverOwned(uint256 tokenId, address account) view returns (bool)",
+  "function getOwnershipHistory(uint256 tokenId) view returns (address[], uint256[])",
+  "function getTransferCount(uint256 tokenId) view returns (uint256)",
+  "function getEverOwnedTokens(address account) view returns (uint256[])",
+  "function getOriginallyCreatedTokens(address creator) view returns (uint256[])",
+  "function isEarlyAdopter(address account, uint256 blockThreshold) view returns (bool)",
+  "function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) view returns (address)",
+  "function getProvenanceReport(uint256 tokenId) view returns (address, uint256, address, uint256, address[], uint256[])",
+  "function transferOwnership(address newOwner) external"
 ]
 ```
 
@@ -100,9 +112,9 @@ await (await nft.burn(tokenId)).wait();
 
 | Operation  | ERC-721   | ERC-721H  | Overhead |
 |:-----------|:----------|:----------|:---------|
-| Mint       | ~50,000   | ~80,000   | +60%     |
-| Transfer   | ~50,000   | ~90,000   | +80%     |
-| Burn       | ~30,000   | ~45,000   | +50%     |
+| Mint       | ~50,000   | ~332,000  | +564%    |
+| Transfer   | ~50,000   | ~170,000  | +240%    |
+| Burn       | ~30,000   | ~10,000   | -67%     |
 | Read history | Free    | Free      | —        |
 
-> **Trade-off**: Slightly higher write gas for permanent on-chain provenance.
+> **Trade-off**: Higher write gas for permanent on-chain provenance with dual Sybil protection.
