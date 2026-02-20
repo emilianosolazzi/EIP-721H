@@ -1,9 +1,9 @@
 ---
-eip: XXXX  (number TBD)
+eip: XXXX (TBD)
 title: ERC-721H — Historical Ownership Extension for ERC-721
 description: An extension to ERC-721 that preserves complete, on-chain ownership history through a three-layer model.
 author: Emiliano Solazzi 
-discussions-to: https://ethereum-magicians.org/t/erc-721h-historical-ownership-tracking/XXXX  (number TBD)
+discussions-to: https://ethereum-magicians.org/t/erc-721h-historical-ownership-tracking/XXXX
 status: Draft
 type: Standards Track
 category: ERC
@@ -109,7 +109,10 @@ interface IERC721H {
 
     /// @notice Returns true if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
-
+    /// @notice Returns the owner of `tokenId` at the specified block `timestamp`.
+    /// @dev Returns address(0) if no owner was recorded at that exact timestamp.
+    ///      Used for Sybil-resistant timestamp-based queries.
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external view returns (address);
     // ── Layer 3: Current Authority ────────────────────
 
     /// @notice Returns true if `account` is the current owner of `tokenId`.
@@ -160,12 +163,18 @@ interface IERC721H {
 
 11. Layer 3 MUST behave identically to ERC-721. `ownerOf()`, `balanceOf()`, `transferFrom()`, `safeTransferFrom()`, `approve()`, `setApprovalForAll()`, `getApproved()`, and `isApprovedForAll()` MUST comply with ERC-721.
 
+#### Sybil Protection (Dual-Layer)
+
+17. Contracts SHOULD implement intra-transaction protection using EIP-1153 transient storage to block multiple transfers of the same token within one transaction (A→B→C chains).
+18. Contracts MUST implement inter-transaction protection via `_ownerAtTimestamp` mapping to enforce one owner per token per block timestamp across separate transactions.
+19. `getOwnerAtTimestamp(tokenId, timestamp)` MUST return the address recorded at that exact timestamp, or `address(0)` if none was recorded.
+
 #### Burn Behavior
 
 12. When a token is burned, Layer 3 data (current owner) MUST be cleared.
 13. When a token is burned, Layer 1 data (`originalCreator`, `mintBlock`) MUST be preserved.
 14. When a token is burned, Layer 2 data (`_ownershipHistory`, `_ownershipTimestamps`, `_hasOwnedToken`) MUST be preserved.
-15. After burn, `originalCreator(tokenId)` MUST still return the original minter. `getOwnershipHistory(tokenId)` MAY revert (token no longer exists) or MAY return the preserved history — implementations SHOULD document their choice.
+15. After burn, `originalCreator(tokenId)` MUST still return the original minter. `getOwnershipHistory(tokenId)` MUST return the preserved history. Implementations MUST use `originalCreator[tokenId]` (not `_currentOwner[tokenId]`) for existence checks in view functions so that Layer 2 queries survive burn.
 
 #### ERC-165
 
@@ -214,12 +223,12 @@ Without deduplication, a token bouncing between Alice and Bob (Alice → Bob →
 
 | Operation | ERC-721 | ERC-721H | Overhead | Cause |
 |:----------|:--------|:---------|:---------|:------|
-| Mint | ~50,000 | ~80,000 | +60% | 3 additional SSTOREs (origin, history, timestamp) |
-| Transfer | ~50,000 | ~90,000 | +80% | 2 SSTOREs (history append, timestamp) + 1 conditional SSTORE (dedup) |
-| Burn | ~30,000 | ~45,000 | +50% | Skips SSTORE refunds for preserved data |
+| Mint | ~50,000 | ~332,000 | +564% | 3 layers + dual Sybil guards (transient + timestamp) + history arrays |
+| Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup check |
+| Burn | ~30,000 | ~10,000 | -67% | Skips SSTORE refunds for preserved Layer 1 & 2 data |
 | Read | Free | Free | — | All queries are `view` |
 
-This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the 60–80% premium is the explicit trade-off for permanent, trustless provenance.
+This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the higher cost is the explicit trade-off for permanent, trustless provenance with Sybil-resistant timestamp tracking.
 
 ## Backwards Compatibility
 
@@ -257,6 +266,7 @@ mapping(address => uint256[]) private _createdTokens;
 mapping(uint256 => address[]) private _ownershipHistory;
 mapping(uint256 => uint256[]) private _ownershipTimestamps;
 mapping(address => uint256[]) private _everOwnedTokens;
+mapping(uint256 => mapping(uint256 => address)) private _ownerAtTimestamp;
 mapping(uint256 => mapping(address => bool)) private _hasOwnedToken;
 ```
 
@@ -279,6 +289,7 @@ function mint(address to) public onlyOwner returns (uint256) {
     _ownershipTimestamps[tokenId].push(block.timestamp);
     _everOwnedTokens[to].push(tokenId);
     _hasOwnedToken[tokenId][to] = true;
+    _ownerAtTimestamp[tokenId][block.timestamp] = to;
     emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
 
     // Layer 3: Current owner
@@ -293,11 +304,19 @@ function mint(address to) public onlyOwner returns (uint256) {
 **Transfer (updates Layer 2 & 3, preserves Layer 1):**
 
 ```solidity
-function _transfer(address from, address to, uint256 tokenId) internal nonReentrant {
+function _transfer(address from, address to, uint256 tokenId)
+    internal nonReentrant oneTransferPerTokenPerTx(tokenId)
+{
     if (ownerOf(tokenId) != from) revert NotAuthorized();
     if (to == address(0)) revert ZeroAddress();
 
     delete _tokenApprovals[tokenId];
+
+    // Sybil guard: one owner per token per block timestamp (inter-TX)
+    if (_ownerAtTimestamp[tokenId][block.timestamp] != address(0)) {
+        revert OwnerAlreadyRecordedForTimestamp();
+    }
+    _ownerAtTimestamp[tokenId][block.timestamp] = to;
 
     // Layer 2: Append to history (deduplicated)
     _ownershipHistory[tokenId].push(to);
@@ -324,12 +343,16 @@ function burn(uint256 tokenId) public {
     if (msg.sender != tokenOwner && !_isApprovedOrOwner(msg.sender, tokenId)) {
         revert NotApprovedOrOwner();
     }
+
+    // Clear approvals
     delete _tokenApprovals[tokenId];
 
-    // Layer 1 & 2: PRESERVED
-    // Layer 3: Cleared
+    // LAYER 1 & 2: PRESERVED (immutable history survives burn)
+
+    // LAYER 3: Remove current owner
     _currentOwner[tokenId] = address(0);
     _balances[tokenOwner] -= 1;
+
     emit Transfer(tokenOwner, address(0), tokenId);
 }
 ```
@@ -350,6 +373,23 @@ function supportsInterface(bytes4 interfaceId) public pure returns (bool) {
         || interfaceId == 0x80ac58cd                    // ERC-721
         || interfaceId == 0x5b5e139f                    // ERC-721 Metadata
         || interfaceId == type(IERC721H).interfaceId;   // ERC-721H
+}
+```
+
+**Intra-TX Sybil Guard (EIP-1153 transient storage):**
+
+```solidity
+modifier oneTransferPerTokenPerTx(uint256 tokenId) {
+    assembly {
+        let flag := tload(tokenId)
+        if eq(flag, 1) {
+            let ptr := mload(0x40)
+            mstore(ptr, shl(224, 0x96817234)) // TokenAlreadyTransferredThisTx()
+            revert(ptr, 4)
+        }
+        tstore(tokenId, 1)
+    }
+    _;
 }
 ```
 
@@ -379,3 +419,6 @@ An attacker could repeatedly transfer a token to inflate `_ownershipHistory`. Ea
 
 Burning preserves Layer 1 and Layer 2 storage. This means storage slots are **not** refunded on burn, unlike standard ERC-721. This is intentional — the historical data has value — but implementers should document this behavior.
 
+## Copyright
+
+Copyright and related rights waived via [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
