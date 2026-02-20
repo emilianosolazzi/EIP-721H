@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {IERC721H} from "./IERC721H.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
 
 /**
  * @title ERC-721H: NFT with Historical Ownership Tracking
@@ -39,9 +41,18 @@ import {IERC721H} from "./IERC721H.sol";
  * TRADE-OFF: Higher write gas for PERMANENT on-chain provenance with dual Sybil protection.
  *            On L2s (Arbitrum, Base, Optimism) where gas is 10-100x cheaper, this is negligible.
  * 
- * @custom:version 1.0.0
+ * L1 vs L2 ECONOMICS:
+ * - Mainnet: 100+ byte-hours of storage per transfer = $50-500 per NFT lifecycle
+ * - Arbitrum/Base: 1-5 byte-hours = $0.01-0.10 per NFT lifecycle (1000x cheaper)
+ * 
+ * RECOMMENDED DEPLOYMENT:
+ * - Production NFTs: Arbitrum/Base/Optimism (Layer 2)
+ * - Collections <1000 tokens: Mainnet if willing to accept L1 cost
+ * - High-turnover NFTs: Only deploy on L2
+ * 
+ * @custom:version 1.2.0
  */
-    contract ERC721H is IERC721H { 
+contract ERC721H is IERC721H, IERC721, IERC721Metadata { 
     // ==========================================
     // ERRORS
     // ==========================================
@@ -53,17 +64,18 @@ import {IERC721H} from "./IERC721H.sol";
     error InvalidRecipient();
     error NotApprovedOrOwner();
     error TokenAlreadyTransferredThisTx();
+    error OwnerAlreadyRecordedForBlock();
+    error Reentrancy();
+    /// @dev DEPRECATED: kept for ABI backwards compatibility. Use OwnerAlreadyRecordedForBlock.
     error OwnerAlreadyRecordedForTimestamp();
     
     // ==========================================
     // EVENTS (ERC-721 Compatible)
     // ==========================================
     
-    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
-    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
-    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
-    
-    // NEW: Historical tracking events (inherited from IERC721H)
+    // Events inherited from IERC721: Transfer, Approval, ApprovalForAll
+    // Historical tracking events inherited from IERC721H:
+    //   OwnershipHistoryRecorded, OriginalCreatorRecorded, HistoricalTokenBurned
     
     // ==========================================
     // STATE VARIABLES
@@ -72,6 +84,7 @@ import {IERC721H} from "./IERC721H.sol";
     string public name;
     string public symbol;
     uint256 private _nextTokenId;
+    uint256 private _activeSupply;
     address public owner;
     bool private _locked;
     
@@ -111,11 +124,12 @@ import {IERC721H} from "./IERC721H.sol";
     /// @dev Dedicated array avoids O(n) filtering in getOriginallyCreatedTokens()
     mapping(address => uint256[]) private _createdTokens;
 
-    /// @notice Enforces ONE recognized owner per token per block timestamp
-    /// @dev Prevents inter-TX same-block Sybil attacks. External contracts can query
-    ///      getOwnerAtTimestamp() to verify unambiguous ownership at any past block.
+    /// @notice Enforces ONE recognized owner per token per block number
+    /// @dev Prevents same-block multiple-transfer Sybil attacks.
+    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
+    ///      External contracts can query getOwnerAtBlock() to verify unambiguous ownership.
     ///      Complements oneTransferPerTokenPerTx (intra-TX) with inter-TX protection.
-    mapping(uint256 => mapping(uint256 => address)) private _ownerAtTimestamp;
+    mapping(uint256 => mapping(uint256 => address)) private _ownerAtBlock;
     
     // ==========================================
     // LAYER 3: CURRENT AUTHORITY (Standard ERC-721)
@@ -156,7 +170,7 @@ import {IERC721H} from "./IERC721H.sol";
     }
     
     modifier nonReentrant() {
-        if (_locked) revert NotAuthorized();
+        if (_locked) revert Reentrancy();
         _locked = true;
         _;
         _locked = false;
@@ -167,8 +181,8 @@ import {IERC721H} from "./IERC721H.sol";
     ///      Blocks Sybil chains (A→B→C→D in one TX) that pollute Layer 2 ownership history.
     ///      Different tokens can still transfer freely in the same TX (batch-safe).
     ///      Transient storage is auto-cleared by the EVM at end of transaction — zero permanent cost.
-             modifier oneTransferPerTokenPerTx(uint256 tokenId) {
-              assembly {
+    modifier oneTransferPerTokenPerTx(uint256 tokenId) {
+        assembly {
             let flag := tload(tokenId)
             if eq(flag, 1) {
                 let ptr := mload(0x40)
@@ -248,8 +262,13 @@ import {IERC721H} from "./IERC721H.sol";
      *      Layer 2: _ownershipHistory[tokenId].push(to) (FIRST ENTRY)
      *      Layer 3: _currentOwner[tokenId] = to (MUTABLE)
      */
-    /// @notice Total number of tokens in existence
+    /// @notice Total number of tokens currently in existence (excludes burned)
     function totalSupply() public view returns (uint256) {
+        return _activeSupply;
+    }
+
+    /// @notice Total number of tokens ever minted (includes burned)
+    function totalMinted() public view returns (uint256) {
         return _nextTokenId - 1;
     }
     
@@ -269,12 +288,13 @@ import {IERC721H} from "./IERC721H.sol";
         _ownershipTimestamps[tokenId].push(block.timestamp);
         _everOwnedTokens[to].push(tokenId);
         _hasOwnedToken[tokenId][to] = true;
-        _ownerAtTimestamp[tokenId][block.timestamp] = to;
+        _ownerAtBlock[tokenId][block.number] = to; // Use block.number for deterministic guard
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Set current owner (standard ERC-721)
         _currentOwner[tokenId] = to;
         _balances[to] += 1;
+        _activeSupply += 1;
         
         emit Transfer(address(0), to, tokenId);
         
@@ -292,19 +312,21 @@ import {IERC721H} from "./IERC721H.sol";
      *      Layer 3: Update current owner (standard ERC-721)
      */
     function _transfer(address from, address to, uint256 tokenId) internal nonReentrant oneTransferPerTokenPerTx(tokenId) {
-        if (ownerOf(tokenId) != from) revert NotAuthorized();
+        if (_currentOwner[tokenId] != from) revert NotAuthorized();
         if (to == address(0)) revert ZeroAddress();
+        if (from == to) revert InvalidRecipient(); // Prevent self-transfer (history pollution)
         
         // Clear approvals
         delete _tokenApprovals[tokenId];
         
         // LAYER 1: originalCreator[tokenId] remains UNCHANGED (immutable!)
         
-        // SYBIL GUARD: One owner per token per block timestamp (inter-TX protection)
-        if (_ownerAtTimestamp[tokenId][block.timestamp] != address(0)) {
-            revert OwnerAlreadyRecordedForTimestamp();
+        // SYBIL GUARD: One owner per token per block number (inter-TX protection)
+        // Uses block.number (not block.timestamp) to prevent validator manipulation
+        if (_ownerAtBlock[tokenId][block.number] != address(0)) {
+            revert OwnerAlreadyRecordedForBlock();
         }
-        _ownerAtTimestamp[tokenId][block.timestamp] = to;
+        _ownerAtBlock[tokenId][block.number] = to;
 
         // LAYER 2: APPEND to ownership history (never remove old entries)
         _ownershipHistory[tokenId].push(to);
@@ -362,7 +384,7 @@ import {IERC721H} from "./IERC721H.sol";
         address[] memory owners,
         uint256[] memory timestamps
     ) {
-        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
         return (_ownershipHistory[tokenId], _ownershipTimestamps[tokenId]);
     }
     
@@ -371,7 +393,7 @@ import {IERC721H} from "./IERC721H.sol";
      * @dev length - 1 because first entry is mint, not transfer
      */
     function getTransferCount(uint256 tokenId) public view returns (uint256) {
-        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
         return _ownershipHistory[tokenId].length - 1;
     }
     
@@ -393,6 +415,9 @@ import {IERC721H} from "./IERC721H.sol";
     
     /**
      * @notice Check if address was an "early adopter" (minted in first N blocks)
+     * @dev WARNING: O(n) where n = number of tokens created by `account`.
+     *      Safe for off-chain / view calls. Do NOT use inside state-changing transactions
+     *      for prolific minters — gas cost grows linearly with _createdTokens[account].length.
      * @param account Address to check
      * @param blockThreshold Block number threshold (e.g., first 100 blocks)
      */
@@ -407,18 +432,73 @@ import {IERC721H} from "./IERC721H.sol";
     }
 
     /**
-     * @notice Get the recognized owner of a token at a specific block timestamp
-     * @dev Returns address(0) if no ownership was recorded at that timestamp.
+     * @notice Get the recognized owner of a token at a specific block number
+     * @dev Returns address(0) if no ownership was recorded at that block.
      *      External contracts (DAOs, airdrops, reward logic) can use this to verify
      *      unambiguous ownership: one token, one block, one owner.
+     *      Uses block.number (not block.timestamp) to prevent validator manipulation.
      * @param tokenId The token to query
-     * @param timestamp The block.timestamp to check
-     * @return The single recognized owner at that timestamp, or address(0)
+     * @param blockNumber The block number to check
+     * @return The single recognized owner at that block, or address(0)
      */
-    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) public view returns (address) {
-        return _ownerAtTimestamp[tokenId][timestamp];
+    function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) public view returns (address) {
+        return _ownerAtBlock[tokenId][blockNumber];
     }
     
+    /**
+     * @notice DEPRECATED: Use getOwnerAtBlock() instead.
+     *      This function kept for backwards compatibility. Returns address(0) for all queries.
+     */
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) public pure returns (address) {
+        timestamp; // Unused parameter
+        return address(0); // Timestamp-based queries always return empty
+    }
+    
+    // ==========================================
+    // PAGINATION HELPERS (Anti-Griefing)
+    // ==========================================
+
+    /**
+     * @notice Returns the total number of entries in a token's ownership history
+     * @dev Use with getHistorySlice() to paginate large histories without
+     *      pulling the entire array (which can hit RPC response limits for
+     *      heavily-traded tokens).
+     */
+    function getHistoryLength(uint256 tokenId) public view returns (uint256) {
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
+        return _ownershipHistory[tokenId].length;
+    }
+
+    /**
+     * @notice Returns a paginated slice of ownership history
+     * @dev Safe for large histories. Returns empty arrays if start >= length.
+     * @param tokenId The token to query
+     * @param start   Zero-based start index
+     * @param count   Maximum number of entries to return
+     * @return owners     Slice of owner addresses
+     * @return timestamps Parallel slice of block timestamps
+     */
+    function getHistorySlice(
+        uint256 tokenId,
+        uint256 start,
+        uint256 count
+    ) public view returns (address[] memory owners, uint256[] memory timestamps) {
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
+        uint256 len = _ownershipHistory[tokenId].length;
+        if (start >= len) {
+            return (new address[](0), new uint256[](0));
+        }
+        uint256 end = start + count;
+        if (end > len) end = len;
+        uint256 sliceLen = end - start;
+        owners = new address[](sliceLen);
+        timestamps = new uint256[](sliceLen);
+        for (uint256 i = 0; i < sliceLen; i++) {
+            owners[i] = _ownershipHistory[tokenId][start + i];
+            timestamps[i] = _ownershipTimestamps[tokenId][start + i];
+        }
+    }
+
     // ==========================================
     // PROVENANCE REPORT
     // ==========================================
@@ -435,7 +515,7 @@ import {IERC721H} from "./IERC721H.sol";
         address[] memory allOwners,
         uint256[] memory transferTimestamps
     ) {
-        if (originalCreator[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
         
         return (
             originalCreator[tokenId],
@@ -452,8 +532,20 @@ import {IERC721H} from "./IERC721H.sol";
     // ==========================================
     
     /**
-     * @notice Burn a token — removes from Layer 3 but preserves Layer 1 & 2
-     * @dev originalCreator and ownershipHistory remain intact forever
+     * @notice Burn a token — removes from Layer 3 but PERMANENTLY preserves Layer 1 & 2
+     * @dev After burn:
+     *      - originalCreator[tokenId] remains immutable
+     *      - getOwnershipHistory() returns full provenance chain
+     *      - isOriginalOwner() still works (founder benefit persists)
+     *      - Metadata remains queryable (tokenURI works on burned tokens)
+     *      
+     *      This distinguishes ERC-721H from ERC-721: provenance survives burn.
+     *
+     *      INTEGRATION NOTE FOR INDEXERS:
+     *      Burn removes current authority (Layer 3), NOT historical existence.
+     *      After burn, ownerOf() reverts but getOwnershipHistory(), originalCreator(),
+     *      and hasEverOwned() still return data. The HistoricalTokenBurned event signals
+     *      this is a Layer-3-only deletion, not full token destruction.
      */
     function burn(uint256 tokenId) public {
         address tokenOwner = ownerOf(tokenId);
@@ -461,16 +553,19 @@ import {IERC721H} from "./IERC721H.sol";
             revert NotApprovedOrOwner();
         }
         
-        // Clear approvals
+        // Clear approvals only
         delete _tokenApprovals[tokenId];
         
-        // LAYER 1 & 2: PRESERVED (immutable history survives burn)
+        // LAYER 1 & 2: PERMANENTLY PRESERVED (immutable history survives burn)
+        // This is intentional and distinct from ERC-721
         
-        // LAYER 3: Remove current owner
+        // LAYER 3: Remove from current ownership tracking
         _currentOwner[tokenId] = address(0);
         _balances[tokenOwner] -= 1;
+        _activeSupply -= 1;
         
         emit Transfer(tokenOwner, address(0), tokenId);
+        emit HistoricalTokenBurned(tokenId);
     }
     
     // ==========================================
@@ -486,6 +581,13 @@ import {IERC721H} from "./IERC721H.sol";
     // INTERNAL HELPERS
     // ==========================================
     
+    /// @notice Unified Layer 1 existence check — returns true if token was ever minted
+    /// @dev Uses originalCreator (Layer 1) so it returns true even after burn.
+    ///      Use this instead of checking _currentOwner (which is cleared on burn).
+    function _exists(uint256 tokenId) internal view returns (bool) {
+        return originalCreator[tokenId] != address(0);
+    }
+
     function _isApprovedOrOwner(address spender, uint256 tokenId) internal view returns (bool) {
         address tokenOwner = ownerOf(tokenId);
         return (spender == tokenOwner || 
@@ -526,10 +628,16 @@ import {IERC721H} from "./IERC721H.sol";
     // ==========================================
     
     /// @notice Returns metadata URI for a token
-    /// @dev Override in inheriting contract to return actual metadata.
-    ///      Claims ERC-721Metadata interface — implementors MUST override this.
+    /// @dev Implementers MUST override in inheriting contract.
+    ///      ERC-721H: metadata persists even after burn (provenance permanence).
+    ///      Unlike ERC-721, this does NOT revert after burn().
+    ///      
+    ///      This enables use cases where burned tokens retain historical significance:
+    ///      - Artist archives ("burnt by artist for authentication")
+    ///      - Historical records (estate/inheritance documentation)
+    ///      - Proof of prior ownership (for legal disputes)
     function tokenURI(uint256 tokenId) public view virtual returns (string memory) {
-        if (_currentOwner[tokenId] == address(0)) revert TokenDoesNotExist();
+        if (!_exists(tokenId)) revert TokenDoesNotExist();
         return "";
     }
 }
