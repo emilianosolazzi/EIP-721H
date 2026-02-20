@@ -4,6 +4,8 @@ pragma solidity 0.8.30;
 import {IERC721H} from "./IERC721H.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol";
+import {ERC721HStorageLib} from "./ERC721HStorageLib.sol";
+import {ERC721HCoreLib} from "./ERC721HCoreLib.sol";
 
 /**
  * @title ERC-721H: NFT with Historical Ownership Tracking
@@ -50,9 +52,18 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
  * - Collections <1000 tokens: Mainnet if willing to accept L1 cost
  * - High-turnover NFTs: Only deploy on L2
  * 
- * @custom:version 1.5.0
+ * ARCHITECTURE (v2.0):
+ * Layer 1 & 2 storage operations are delegated to ERC721HStorageLib (low-level)
+ * and ERC721HCoreLib (high-level queries). This keeps the main contract lean,
+ * promotes reusability across RWA projects, and isolates critical logic for auditing.
+ * All library functions are `internal` — inlined at compile time for zero gas overhead.
+ * 
+ * @custom:version 2.0.0
  */
 contract ERC721H is IERC721H, IERC721, IERC721Metadata { 
+    using ERC721HStorageLib for ERC721HStorageLib.HistoryStorage;
+    using ERC721HCoreLib for ERC721HStorageLib.HistoryStorage;
+
     // ==========================================
     // ERRORS
     // ==========================================
@@ -92,44 +103,15 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     bool private _locked;
     
     // ==========================================
-    // LAYER 1: IMMUTABLE ORIGIN
+    // LAYER 1 & 2: HISTORICAL OWNERSHIP (Library)
     // ==========================================
-    
-    /// @notice IMMUTABLE record of who FIRST minted/created each token
-    /// @dev This mapping is set ONCE at mint and NEVER modified
-    ///      Use isOriginalOwner() to check if address was the creator
-    mapping(uint256 => address) public originalCreator;
-    
-    /// @notice Block number when token was originally minted
-    mapping(uint256 => uint256) public mintBlock;
-    
-    // ==========================================
-    // LAYER 2: HISTORICAL TRAIL
-    // ==========================================
-    
-    /// @notice APPEND-ONLY history of all owners for each token
-    /// @dev New owners are added but old entries are NEVER removed
-    ///      Use getOwnershipHistory() to retrieve complete chain
-    mapping(uint256 => address[]) private _ownershipHistory;
-    
-    /// @notice Timestamp of each ownership transfer
-    mapping(uint256 => uint256[]) private _ownershipTimestamps;
 
-    /// @notice Block number of each ownership change (parallel to _ownershipHistory)
-    /// @dev Enables O(log n) binary-search lookup for getOwnerAtBlock() at any arbitrary block.
-    mapping(uint256 => uint256[]) private _ownershipBlocks;
-    
-    /// @notice All tokens that an address has EVER owned (historical, deduplicated)
-    /// @dev Does NOT remove tokens after transfer (historical record)
-    mapping(address => uint256[]) private _everOwnedTokens;
-    
-    /// @notice O(1) lookup: has address ever owned a specific token?
-    /// @dev Prevents duplicates in _everOwnedTokens and replaces linear scan in hasEverOwned()
-    mapping(uint256 => mapping(address => bool)) private _hasOwnedToken;
-    
-    /// @notice Tokens originally created by each address (set once at mint)
-    /// @dev Dedicated array avoids O(n) filtering in getOriginallyCreatedTokens()
-    mapping(address => uint256[]) private _createdTokens;
+    /// @notice All Layer 1 (origin) and Layer 2 (history) storage, managed by ERC721HStorageLib.
+    /// @dev See ERC721HStorageLib.HistoryStorage for the full struct layout.
+    ///      Layer 1: originalCreator, mintBlock, createdTokens
+    ///      Layer 2: ownershipHistory, ownershipTimestamps, ownershipBlocks,
+    ///               everOwnedTokens, hasOwnedToken
+    ERC721HStorageLib.HistoryStorage private _history;
     
     // ==========================================
     // LAYER 3: CURRENT AUTHORITY (Standard ERC-721)
@@ -285,18 +267,9 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
 
         _beforeTokenTransfer(address(0), to, tokenId);
         
-        // LAYER 1: Record IMMUTABLE original creator
-        originalCreator[tokenId] = to;
-        mintBlock[tokenId] = block.number;
-        _createdTokens[to].push(tokenId);
+        // LAYER 1 & 2: Record origin + first history entry (via library)
+        _history.recordMint(tokenId, to, block.number, block.timestamp);
         emit OriginalCreatorRecorded(tokenId, to);
-        
-        // LAYER 2: Start ownership history trail
-        _ownershipHistory[tokenId].push(to);
-        _ownershipTimestamps[tokenId].push(block.timestamp);
-        _ownershipBlocks[tokenId].push(block.number);
-        _everOwnedTokens[to].push(tokenId);
-        _hasOwnedToken[tokenId][to] = true;
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Set current owner (standard ERC-721)
@@ -334,25 +307,13 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         // LAYER 1: originalCreator[tokenId] remains UNCHANGED (immutable!)
         
         // SYBIL GUARD: One owner per token per block number (inter-TX protection)
-        // Derived from existing _ownershipBlocks — zero additional storage.
-        // Last entry records the most recent ownership-change block; if it matches
-        // the current block, this is a same-block double-transfer → reject.
-        {
-            uint256 len = _ownershipBlocks[tokenId].length;
-            if (len > 0 && _ownershipBlocks[tokenId][len - 1] == block.number) {
-                revert OwnerAlreadyRecordedForBlock();
-            }
+        // Derived from _ownershipBlocks via library — zero additional storage.
+        if (_history.isSameBlockTransfer(tokenId, block.number)) {
+            revert OwnerAlreadyRecordedForBlock();
         }
 
-        // LAYER 2: APPEND to ownership history (never remove old entries)
-        _ownershipHistory[tokenId].push(to);
-        _ownershipTimestamps[tokenId].push(block.timestamp);
-        _ownershipBlocks[tokenId].push(block.number);
-        // Deduplicate: only add to _everOwnedTokens if first time owning
-        if (!_hasOwnedToken[tokenId][to]) {
-            _everOwnedTokens[to].push(tokenId);
-            _hasOwnedToken[tokenId][to] = true;
-        }
+        // LAYER 2: APPEND to ownership history (via library — auto-deduplicates)
+        _history.recordTransfer(tokenId, to, block.number, block.timestamp);
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Update current owner (standard ERC-721)
@@ -368,6 +329,16 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     // +++++++++++++++++++++++++++++++++++++++++++++++++
     // HISTORICAL QUERY FUNCTIONS (The Innovation!)
     // +++++++++++++++++++++++++++++++++++++++++++++++++
+
+    /// @notice Returns the address that originally minted `tokenId` (Layer 1 immutable).
+    function originalCreator(uint256 tokenId) public view returns (address) {
+        return _history.originalCreator[tokenId];
+    }
+
+    /// @notice Returns the block number at which `tokenId` was minted.
+    function mintBlock(uint256 tokenId) public view returns (uint256) {
+        return _history.mintBlock[tokenId];
+    }
     
     /**
      * @notice Check if address was the ORIGINAL creator/minter
@@ -375,7 +346,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      *      Perfect for "founder benefits" that survive transfers
      */
     function isOriginalOwner(uint256 tokenId, address account) public view returns (bool) {
-        return originalCreator[tokenId] == account;
+        return _history.originalCreator[tokenId] == account;
     }
     
     /**
@@ -388,10 +359,10 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     
     /**
      * @notice Check if address has EVER owned this token
-     * @dev Searches complete ownership history
+     * @dev O(1) lookup via mapping
      */
     function hasEverOwned(uint256 tokenId, address account) public view returns (bool) {
-        return _hasOwnedToken[tokenId][account];
+        return _history.hasEverOwned(tokenId, account);
     }
     
     /**
@@ -404,7 +375,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         uint256[] memory timestamps
     ) {
         if (!_exists(tokenId)) revert TokenDoesNotExist();
-        return (_ownershipHistory[tokenId], _ownershipTimestamps[tokenId]);
+        return (_history.ownershipHistory[tokenId], _history.ownershipTimestamps[tokenId]);
     }
     
     /**
@@ -413,7 +384,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      */
     function getTransferCount(uint256 tokenId) public view returns (uint256) {
         if (!_exists(tokenId)) revert TokenDoesNotExist();
-        return _ownershipHistory[tokenId].length - 1;
+        return _history.getTransferCount(tokenId);
     }
     
     /**
@@ -421,7 +392,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      * @dev This is historical - includes tokens they no longer own
      */
     function getEverOwnedTokens(address account) public view returns (uint256[] memory) {
-        return _everOwnedTokens[account];
+        return _history.everOwnedTokens[account];
     }
     
     /**
@@ -429,68 +400,30 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      * @dev Useful for airdrops to "founders" or "artists"
      */
     function getOriginallyCreatedTokens(address creator) public view returns (uint256[] memory) {
-        return _createdTokens[creator];
+        return _history.createdTokens[creator];
     }
     
     /**
      * @notice Check if address was an "early adopter" (minted in first N blocks)
-     * @dev WARNING: O(n) where n = number of tokens created by `account`.
-     *      Safe for off-chain / view calls. Do NOT use inside state-changing transactions
-     *      for prolific minters — gas cost grows linearly with _createdTokens[account].length.
+     * @dev WARNING: O(n) — delegated to ERC721HCoreLib. See library for details.
      * @param account Address to check
      * @param blockThreshold Block number threshold (e.g., first 100 blocks)
      */
     function isEarlyAdopter(address account, uint256 blockThreshold) public view returns (bool) {
-        uint256[] memory tokens = _createdTokens[account];
-        for (uint256 i = 0; i < tokens.length; i++) {
-            if (mintBlock[tokens[i]] <= blockThreshold) {
-                return true;
-            }
-        }
-        return false;
+        return _history.isEarlyAdopter(account, blockThreshold);
     }
 
     /**
      * @notice Get the owner of a token at ANY arbitrary block number
-     * @dev Uses O(log n) binary search over the chronological _ownershipBlocks[] array.
-     *      Returns the owner who held the token at `blockNumber` — even if no transfer
-     *      happened at that exact block. Finds the last ownership entry at-or-before
-     *      the queried block.
-     *
-     *      Returns address(0) if:
-     *        - Token was not yet minted at `blockNumber`
-     *        - Token does not exist
-     *
-     *      EXAMPLE:
-     *        Block 100: Mint → Alice    → getOwnerAtBlock(1, 100) = Alice
-     *        Block 150: (nothing)        → getOwnerAtBlock(1, 150) = Alice  ✓
-     *        Block 200: Transfer → Bob   → getOwnerAtBlock(1, 200) = Bob
-     *        Block 250: (nothing)        → getOwnerAtBlock(1, 250) = Bob    ✓
-     *
+     * @dev O(log n) binary search — delegated to ERC721HStorageLib.
+     *      Returns the owner who held the token at `blockNumber`, even if no transfer
+     *      happened at that exact block. Returns address(0) if not yet minted.
      * @param tokenId The token to query
      * @param blockNumber The block number to check (any block, not just transfer blocks)
      * @return The owner at that block, or address(0) if not yet minted
      */
     function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) public view returns (address) {
-        uint256[] storage blocks = _ownershipBlocks[tokenId];
-        uint256 len = blocks.length;
-        if (len == 0) return address(0); // Token never minted
-
-        // If queried block is before mint, token didn't exist yet
-        if (blockNumber < blocks[0]) return address(0);
-
-        // Binary search: find last entry where blocks[i] <= blockNumber
-        uint256 low = 0;
-        uint256 high = len - 1;
-        while (low < high) {
-            uint256 mid = low + (high - low + 1) / 2; // Ceiling division to avoid infinite loop
-            if (blocks[mid] <= blockNumber) {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
-        }
-        return _ownershipHistory[tokenId][low];
+        return _history.getOwnerAtBlock(tokenId, blockNumber);
     }
     
     /**
@@ -513,7 +446,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      */
     function getHistoryLength(uint256 tokenId) public view returns (uint256) {
         if (!_exists(tokenId)) revert TokenDoesNotExist();
-        return _ownershipHistory[tokenId].length;
+        return _history.getHistoryLength(tokenId);
     }
 
     /**
@@ -531,19 +464,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         uint256 count
     ) public view returns (address[] memory owners, uint256[] memory timestamps) {
         if (!_exists(tokenId)) revert TokenDoesNotExist();
-        uint256 len = _ownershipHistory[tokenId].length;
-        if (start >= len) {
-            return (new address[](0), new uint256[](0));
-        }
-        uint256 end = start + count;
-        if (end > len) end = len;
-        uint256 sliceLen = end - start;
-        owners = new address[](sliceLen);
-        timestamps = new uint256[](sliceLen);
-        for (uint256 i = 0; i < sliceLen; i++) {
-            owners[i] = _ownershipHistory[tokenId][start + i];
-            timestamps[i] = _ownershipTimestamps[tokenId][start + i];
-        }
+        return _history.getHistorySlice(tokenId, start, count);
     }
 
     // ==========================================
@@ -553,42 +474,26 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     /// @notice Returns the number of distinct tokens `account` has ever owned.
     /// @dev Use with getEverOwnedTokensSlice() to paginate for prolific holders.
     function getEverOwnedTokensLength(address account) public view returns (uint256) {
-        return _everOwnedTokens[account].length;
+        return _history.getEverOwnedTokensLength(account);
     }
 
     /// @notice Returns a paginated slice of tokens `account` has ever owned.
     function getEverOwnedTokensSlice(address account, uint256 start, uint256 count)
         public view returns (uint256[] memory tokenIds)
     {
-        uint256 len = _everOwnedTokens[account].length;
-        if (start >= len) return new uint256[](0);
-        uint256 end = start + count;
-        if (end > len) end = len;
-        uint256 sliceLen = end - start;
-        tokenIds = new uint256[](sliceLen);
-        for (uint256 i = 0; i < sliceLen; i++) {
-            tokenIds[i] = _everOwnedTokens[account][start + i];
-        }
+        return _history.getEverOwnedTokensSlice(account, start, count);
     }
 
     /// @notice Returns the number of tokens `creator` originally minted.
     function getCreatedTokensLength(address creator) public view returns (uint256) {
-        return _createdTokens[creator].length;
+        return _history.getCreatedTokensLength(creator);
     }
 
     /// @notice Returns a paginated slice of tokens `creator` originally minted.
     function getCreatedTokensSlice(address creator, uint256 start, uint256 count)
         public view returns (uint256[] memory tokenIds)
     {
-        uint256 len = _createdTokens[creator].length;
-        if (start >= len) return new uint256[](0);
-        uint256 end = start + count;
-        if (end > len) end = len;
-        uint256 sliceLen = end - start;
-        tokenIds = new uint256[](sliceLen);
-        for (uint256 i = 0; i < sliceLen; i++) {
-            tokenIds[i] = _createdTokens[creator][start + i];
-        }
+        return _history.getCreatedTokensSlice(creator, start, count);
     }
 
     // ==========================================
@@ -608,15 +513,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         uint256[] memory transferTimestamps
     ) {
         if (!_exists(tokenId)) revert TokenDoesNotExist();
-        
-        return (
-            originalCreator[tokenId],
-            mintBlock[tokenId],
-            _currentOwner[tokenId],
-            _ownershipHistory[tokenId].length - 1,
-            _ownershipHistory[tokenId],
-            _ownershipTimestamps[tokenId]
-        );
+        return _history.buildProvenanceReport(tokenId, _currentOwner[tokenId]);
     }
     
     // ==========================================
@@ -686,7 +583,7 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     /// @dev Uses originalCreator (Layer 1) so it returns true even after burn.
     ///      Use this instead of checking _currentOwner (which is cleared on burn).
     function _exists(uint256 tokenId) internal view returns (bool) {
-        return originalCreator[tokenId] != address(0);
+        return _history.exists(tokenId);
     }
 
     function _isApprovedOrOwner(address spender, uint256 tokenId) internal view returns (bool) {
