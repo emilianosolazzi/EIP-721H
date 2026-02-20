@@ -50,7 +50,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
  * - Collections <1000 tokens: Mainnet if willing to accept L1 cost
  * - High-turnover NFTs: Only deploy on L2
  * 
- * @custom:version 1.3.0
+ * @custom:version 1.4.0
  */
 contract ERC721H is IERC721H, IERC721, IERC721Metadata { 
     // ==========================================
@@ -114,6 +114,10 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     
     /// @notice Timestamp of each ownership transfer
     mapping(uint256 => uint256[]) private _ownershipTimestamps;
+
+    /// @notice Block number of each ownership change (parallel to _ownershipHistory)
+    /// @dev Enables O(log n) binary-search lookup for getOwnerAtBlock() at any arbitrary block.
+    mapping(uint256 => uint256[]) private _ownershipBlocks;
     
     /// @notice All tokens that an address has EVER owned (historical, deduplicated)
     /// @dev Does NOT remove tokens after transfer (historical record)
@@ -127,12 +131,12 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     /// @dev Dedicated array avoids O(n) filtering in getOriginallyCreatedTokens()
     mapping(address => uint256[]) private _createdTokens;
 
-    /// @notice Enforces ONE recognized owner per token per block number
-    /// @dev Prevents same-block multiple-transfer Sybil attacks.
+    /// @notice Sybil guard: enforces ONE ownership change per token per block number
+    /// @dev Prevents same-block multiple-transfer Sybil attacks (inter-TX protection).
     ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
-    ///      External contracts can query getOwnerAtBlock() to verify unambiguous ownership.
+    ///      This is NOT for historical queries — use getOwnerAtBlock() for that.
     ///      Complements oneTransferPerTokenPerTx (intra-TX) with inter-TX protection.
-    mapping(uint256 => mapping(uint256 => address)) private _ownerAtBlock;
+    mapping(uint256 => mapping(uint256 => address)) private _sybilGuardBlock;
     
     // ==========================================
     // LAYER 3: CURRENT AUTHORITY (Standard ERC-721)
@@ -297,9 +301,10 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         // LAYER 2: Start ownership history trail
         _ownershipHistory[tokenId].push(to);
         _ownershipTimestamps[tokenId].push(block.timestamp);
+        _ownershipBlocks[tokenId].push(block.number);
         _everOwnedTokens[to].push(tokenId);
         _hasOwnedToken[tokenId][to] = true;
-        _ownerAtBlock[tokenId][block.number] = to; // Use block.number for deterministic guard
+        _sybilGuardBlock[tokenId][block.number] = to; // Sybil guard (inter-TX)
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Set current owner (standard ERC-721)
@@ -338,14 +343,15 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         
         // SYBIL GUARD: One owner per token per block number (inter-TX protection)
         // Uses block.number (not block.timestamp) to prevent validator manipulation
-        if (_ownerAtBlock[tokenId][block.number] != address(0)) {
+        if (_sybilGuardBlock[tokenId][block.number] != address(0)) {
             revert OwnerAlreadyRecordedForBlock();
         }
-        _ownerAtBlock[tokenId][block.number] = to;
+        _sybilGuardBlock[tokenId][block.number] = to;
 
         // LAYER 2: APPEND to ownership history (never remove old entries)
         _ownershipHistory[tokenId].push(to);
         _ownershipTimestamps[tokenId].push(block.timestamp);
+        _ownershipBlocks[tokenId].push(block.number);
         // Deduplicate: only add to _everOwnedTokens if first time owning
         if (!_hasOwnedToken[tokenId][to]) {
             _everOwnedTokens[to].push(tokenId);
@@ -449,17 +455,46 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     }
 
     /**
-     * @notice Get the recognized owner of a token at a specific block number
-     * @dev Returns address(0) if no ownership was recorded at that block.
-     *      External contracts (DAOs, airdrops, reward logic) can use this to verify
-     *      unambiguous ownership: one token, one block, one owner.
-     *      Uses block.number (not block.timestamp) to prevent validator manipulation.
+     * @notice Get the owner of a token at ANY arbitrary block number
+     * @dev Uses O(log n) binary search over the chronological _ownershipBlocks[] array.
+     *      Returns the owner who held the token at `blockNumber` — even if no transfer
+     *      happened at that exact block. Finds the last ownership entry at-or-before
+     *      the queried block.
+     *
+     *      Returns address(0) if:
+     *        - Token was not yet minted at `blockNumber`
+     *        - Token does not exist
+     *
+     *      EXAMPLE:
+     *        Block 100: Mint → Alice    → getOwnerAtBlock(1, 100) = Alice
+     *        Block 150: (nothing)        → getOwnerAtBlock(1, 150) = Alice  ✓
+     *        Block 200: Transfer → Bob   → getOwnerAtBlock(1, 200) = Bob
+     *        Block 250: (nothing)        → getOwnerAtBlock(1, 250) = Bob    ✓
+     *
      * @param tokenId The token to query
-     * @param blockNumber The block number to check
-     * @return The single recognized owner at that block, or address(0)
+     * @param blockNumber The block number to check (any block, not just transfer blocks)
+     * @return The owner at that block, or address(0) if not yet minted
      */
     function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) public view returns (address) {
-        return _ownerAtBlock[tokenId][blockNumber];
+        uint256[] storage blocks = _ownershipBlocks[tokenId];
+        uint256 len = blocks.length;
+        if (len == 0) return address(0); // Token never minted
+
+        // If queried block is before mint, token didn't exist yet
+        if (blockNumber < blocks[0]) return address(0);
+
+        // Binary search: find last entry where blocks[i] <= blockNumber
+        uint256 low = 0;
+        uint256 high = len - 1;
+        while (low < high) {
+            uint256 mid = low + (high - low + 1) / 2; // Ceiling division to avoid infinite loop
+            if (blocks[mid] <= blockNumber) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return _ownershipHistory[tokenId][low];
     }
     
     /**
