@@ -1,9 +1,9 @@
 ---
-eip: XXXX (TBD)
-title: ERC-721H — Historical Ownership Extension for ERC-721
+eip: XXXX
+title: Historical Ownership Extension for ERC-721
 description: An extension to ERC-721 that preserves complete, on-chain ownership history through a three-layer model.
-author: Emiliano Solazzi 
-discussions-to: https://ethereum-magicians.org/t/erc-721h-historical-ownership-tracking/XXXX
+author: Emiliano Solazzi (@GITHUB_USERNAME)
+discussions-to: https://ethereum-magicians.org/t/historical-ownership-extension-for-erc-721/XXXX
 status: Draft
 type: Standards Track
 category: ERC
@@ -13,7 +13,7 @@ requires: 165, 721
 
 ## Abstract
 
-This EIP defines an extension to [ERC-721](https://eips.ethereum.org/EIPS/eip-721) that records the **complete ownership history** of every non-fungible token on-chain. ERC-721 tracks only the current owner; the moment a token is transferred, on-chain evidence that the previous holder ever possessed it is lost. ERC-721H introduces a **three-layer ownership model**:
+This EIP defines an extension to [ERC-721](./eip-721.md) that records the **complete ownership history** of every non-fungible token on-chain. ERC-721 tracks only the current owner; the moment a token is transferred, on-chain evidence that the previous holder ever possessed it is lost. This standard introduces a **three-layer ownership model**:
 
 | Layer | Name | Mutability | Purpose |
 |:------|:-----|:-----------|:--------|
@@ -21,7 +21,7 @@ This EIP defines an extension to [ERC-721](https://eips.ethereum.org/EIPS/eip-72
 | 2 | Historical Trail | Append-only | Chronological list of every past owner |
 | 3 | Current Authority | Mutable | Standard ERC-721 `ownerOf()` semantics |
 
-A compliant contract MUST implement ERC-721, ERC-165, and the `IERC721H` interface defined herein.
+A compliant contract MUST implement [ERC-721](./eip-721.md), [ERC-165](./eip-165.md), and the `IERC721H` interface defined herein.
 
 ## Motivation
 
@@ -33,6 +33,8 @@ ERC-721 stores exactly one piece of ownership data: the **current** owner. When 
 2. **Require off-chain indexers** — The Graph, Alchemy, or custom infrastructure must be trusted to reconstruct history.
 3. **Are fragile** — Indexers go down, have lag, and cost money. Archive nodes are expensive.
 4. **Cannot power on-chain governance** — A DAO cannot grant "founding member" privileges based on event logs alone.
+
+This proposal does not aim to replace event logs, but to enable **on-chain composable history** — ownership data that other smart contracts can read and act on natively, without off-chain intermediaries.
 
 ### Real-World Use Cases That ERC-721 Cannot Serve
 
@@ -48,7 +50,7 @@ ERC-721 stores exactly one piece of ownership data: the **current** owner. When 
 
 ### Why Extend ERC-721 Instead of Creating a New Standard?
 
-ERC-721H is a **strict superset** of ERC-721. Every ERC-721H token is a valid ERC-721 token. Wallets, marketplaces, and existing tooling interact with it identically. The historical layer is additive — contracts that don't need history simply ignore it.
+This standard is a **strict superset** of ERC-721. Every token implementing this standard is a valid ERC-721 token. Wallets, marketplaces, and existing tooling interact with it identically. The historical layer is additive — contracts that don't need history simply ignore it.
 
 ## Specification
 
@@ -56,11 +58,16 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### Interface
 
-Every ERC-721H compliant contract MUST implement the `IERC721H` interface:
+This standard defines two interfaces:
+
+- **`IERC721H`** (Core) — MUST be implemented. Origin tracking, historical ownership, O(log n) block resolution, and pagination.
+- **`IERC721HAnalytics`** (Optional) — MAY be implemented. Convenience queries: provenance reports, early adopter detection, per-address enumeration, and supply tracking.
+
+#### Core Interface (`IERC721H`)
 
 ```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity 0.8.30;
+// SPDX-License-Identifier: CC0-1.0
+pragma solidity >=0.8.0;
 
 interface IERC721H {
     // ── Events ────────────────────────────────────────
@@ -78,7 +85,7 @@ interface IERC721H {
         address indexed creator
     );
 
-    /// @notice Emitted when a token is burned (Layer 3 cleared, Layer 1 & 2 preserved).
+    /// @notice Emitted when a token is burned (Layer 3 cleared).
     event HistoricalTokenBurned(uint256 indexed tokenId);
 
     // ── Layer 1: Immutable Origin ─────────────────────
@@ -101,6 +108,45 @@ interface IERC721H {
     function getOwnershipHistory(uint256 tokenId)
         external view returns (address[] memory owners, uint256[] memory timestamps);
 
+    /// @notice Returns the owner of `tokenId` at any arbitrary `blockNumber`.
+    /// @dev Uses O(log n) binary search over chronological `_ownershipBlocks`.
+    ///      Returns the owner who held the token at `blockNumber`, even if no
+    ///      transfer happened at that exact block. Returns address(0) if the
+    ///      token was not yet minted at `blockNumber`.
+    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
+    function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) external view returns (address);
+
+    // ── Pagination Helpers (Anti-Griefing) ────────────
+
+    /// @notice Returns the total number of entries in `tokenId`'s ownership history.
+    function getHistoryLength(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of ownership history.
+    function getHistorySlice(uint256 tokenId, uint256 start, uint256 count)
+        external view returns (address[] memory owners, uint256[] memory timestamps);
+
+    // ── Layer 3: Current Authority ────────────────────
+
+    /// @notice Returns true if `account` is the current owner of `tokenId`.
+    function isCurrentOwner(uint256 tokenId, address account) external view returns (bool);
+
+    // ── Lifecycle ─────────────────────────────────────
+
+    /// @notice Burns `tokenId`. Layer 1 and Layer 2 data SHOULD be preserved.
+    function burn(uint256 tokenId) external;
+}
+```
+
+#### Analytics Extension (`IERC721HAnalytics`)
+
+Implementations MAY additionally implement the following convenience interface. Support is signaled via [ERC-165](./eip-165.md).
+
+```solidity
+// SPDX-License-Identifier: CC0-1.0
+pragma solidity >=0.8.0;
+
+/// @title IERC721HAnalytics — Optional analytics extension
+interface IERC721HAnalytics {
     /// @notice Returns how many times `tokenId` has been transferred (excludes mint).
     function getTransferCount(uint256 tokenId) external view returns (uint256);
 
@@ -112,50 +158,6 @@ interface IERC721H {
 
     /// @notice Returns true if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
-
-    /// @notice Returns the owner of `tokenId` at any arbitrary `blockNumber`.
-    /// @dev Uses O(log n) binary search over chronological `_ownershipBlocks`.
-    ///      Returns the owner who held the token at `blockNumber`, even if no
-    ///      transfer happened at that exact block. Returns address(0) if the
-    ///      token was not yet minted at `blockNumber`.
-    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
-    function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) external view returns (address);
-
-    /// @notice DEPRECATED: Use getOwnerAtBlock() instead.
-    /// @dev Always returns address(0). Kept for backwards compatibility.
-    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external pure returns (address);
-
-    // ── Pagination Helpers (Anti-Griefing) ────────────
-
-    /// @notice Returns the total number of entries in `tokenId`'s ownership history.
-    function getHistoryLength(uint256 tokenId) external view returns (uint256);
-
-    /// @notice Returns a paginated slice of ownership history.
-    function getHistorySlice(uint256 tokenId, uint256 start, uint256 count)
-        external view returns (address[] memory owners, uint256[] memory timestamps);
-
-    // ── Per-Address Pagination (Anti-Griefing) ────────
-
-    /// @notice Returns the number of distinct tokens `account` has ever owned.
-    function getEverOwnedTokensLength(address account) external view returns (uint256);
-
-    /// @notice Returns a paginated slice of tokens `account` has ever owned.
-    function getEverOwnedTokensSlice(address account, uint256 start, uint256 count)
-        external view returns (uint256[] memory tokenIds);
-
-    /// @notice Returns the number of tokens `creator` originally minted.
-    function getCreatedTokensLength(address creator) external view returns (uint256);
-
-    /// @notice Returns a paginated slice of tokens `creator` originally minted.
-    function getCreatedTokensSlice(address creator, uint256 start, uint256 count)
-        external view returns (uint256[] memory tokenIds);
-
-    // ── Layer 3: Current Authority ────────────────────
-
-    /// @notice Returns true if `account` is the current owner of `tokenId`.
-    function isCurrentOwner(uint256 tokenId, address account) external view returns (bool);
-
-    // ── Aggregate Queries ─────────────────────────────
 
     /// @notice Returns a full provenance report for `tokenId` in a single call.
     function getProvenanceReport(uint256 tokenId)
@@ -174,10 +176,24 @@ interface IERC721H {
     /// @notice Returns the total number of tokens ever minted (includes burned).
     function totalMinted() external view returns (uint256);
 
-    // ── Lifecycle ─────────────────────────────────────
+    // ── Per-Address Pagination ────────────────────────
 
-    /// @notice Burns `tokenId`. Layer 1 and Layer 2 data MUST be preserved.
-    function burn(uint256 tokenId) external;
+    /// @notice Returns the number of distinct tokens `account` has ever owned.
+    function getEverOwnedTokensLength(address account) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of tokens `account` has ever owned.
+    function getEverOwnedTokensSlice(address account, uint256 start, uint256 count)
+        external view returns (uint256[] memory tokenIds);
+
+    /// @notice Returns the number of tokens `creator` originally minted.
+    function getCreatedTokensLength(address creator) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of tokens `creator` originally minted.
+    function getCreatedTokensSlice(address creator, uint256 start, uint256 count)
+        external view returns (uint256[] memory tokenIds);
+
+    /// @notice DEPRECATED: Use getOwnerAtBlock() from IERC721H instead.
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external pure returns (address);
 }
 ```
 
@@ -199,15 +215,7 @@ interface IERC721H {
 9. The `_everOwnedTokens` mapping MUST be deduplicated — if an address receives the same token twice (e.g., Alice → Bob → Alice), the token ID MUST appear only once in Alice's list.
 10. The contract MUST emit `OwnershipHistoryRecorded(tokenId, newOwner, timestamp)` on every mint and transfer.
 
-**Complexity Bounds:** `isEarlyAdopter(account, blockThreshold)` MUST execute in O(n) time where n is the number of tokens created by `account`. Implementations MUST NOT iterate over global token supply.
-
-#### Per-Address Pagination (Anti-Griefing)
-
-10a. `getEverOwnedTokensLength(account)` MUST return the length of the deduplicated `_everOwnedTokens[account]` array.
-10b. `getEverOwnedTokensSlice(account, start, count)` MUST return a slice of at most `count` token IDs starting at index `start`.
-10c. `getCreatedTokensLength(creator)` MUST return the length of the `_createdTokens[creator]` array.
-10d. `getCreatedTokensSlice(creator, start, count)` MUST return a slice of at most `count` token IDs starting at index `start`.
-10e. All pagination functions MUST return an empty array if `start >= length`. They MUST NOT revert.
+All pagination functions (both core and analytics) MUST return an empty array if `start >= length`. They MUST NOT revert.
 
 #### Layer 3 — Current Authority
 
@@ -215,25 +223,37 @@ interface IERC721H {
 
 #### Sybil Protection (Dual-Layer)
 
-17. Contracts SHOULD implement intra-transaction protection using EIP-1153 transient storage to block multiple transfers of the same token within one transaction (A→B→C chains).
+17. Contracts SHOULD implement intra-transaction protection to block multiple transfers of the same token within one transaction (A→B→C chains). If transient storage ([EIP-1153](./eip-1153.md)) is available on the target chain, implementations SHOULD use it for this purpose.
 18. Contracts SHOULD implement inter-transaction protection to enforce one owner per token per block number across separate transactions. The reference implementation derives this from `_ownershipBlocks[tokenId]` — if the last recorded block equals `block.number`, the transfer reverts. No dedicated `_ownerAtBlock` mapping is needed. When implemented, `block.number` MUST be used instead of `block.timestamp` to prevent validator manipulation.
 19. `getOwnerAtBlock(tokenId, blockNumber)` MUST return the owner of `tokenId` at any arbitrary `blockNumber`, not just blocks where a transfer occurred. Implementations SHOULD use O(log n) binary search over the chronological `_ownershipBlocks` array to resolve the last transfer at or before `blockNumber`. Returns `address(0)` if the token was not yet minted at `blockNumber`.
-20. `getOwnerAtTimestamp(uint256, uint256)` is DEPRECATED. Implementations MUST keep it for interface backwards compatibility but it MUST be `pure` and MUST always return `address(0)`.
 21. Contracts MUST prevent self-transfers (`from == to`) to avoid polluting Layer 2 history without actual ownership change.
 
 #### Burn Behavior
 
 12. When a token is burned, Layer 3 data (current owner) MUST be cleared.
-13. When a token is burned, Layer 1 data (`originalCreator`, `mintBlock`) MUST be preserved.
-14. When a token is burned, Layer 2 data (`_ownershipHistory`, `_ownershipTimestamps`, `_hasOwnedToken`) MUST be preserved.
-15. After burn, `originalCreator(tokenId)` MUST still return the original minter. `getOwnershipHistory(tokenId)` MUST return the preserved history. Implementations MUST use `originalCreator[tokenId]` (not `_currentOwner[tokenId]`) for existence checks in view functions so that Layer 2 queries survive burn.
+13. When a token is burned, implementations SHOULD preserve Layer 1 data (`originalCreator`, `mintBlock`). Implementations that do not preserve MUST document this behavior.
+14. When a token is burned, implementations SHOULD preserve Layer 2 data (`_ownershipHistory`, `_ownershipTimestamps`, `_hasOwnedToken`). Implementations that do not preserve MUST document this behavior.
+15. When Layer 1 and Layer 2 data are preserved after burn, `originalCreator(tokenId)` MUST still return the original minter and `getOwnershipHistory(tokenId)` MUST return the full history. Implementations SHOULD use `originalCreator[tokenId]` (not `_currentOwner[tokenId]`) for existence checks in view functions so that Layer 2 queries survive burn.
 
 #### ERC-165
 
-16. Compliant contracts MUST implement ERC-165 and return `true` for:
-    - `0x01ffc9a7` (ERC-165)
-    - `0x80ac58cd` (ERC-721)
+16. Compliant contracts MUST implement [ERC-165](./eip-165.md) and return `true` for:
+    - `0x01ffc9a7` ([ERC-165](./eip-165.md))
+    - `0x80ac58cd` ([ERC-721](./eip-721.md))
     - The interface ID computed as the XOR of all function selectors in `IERC721H`
+    - If `IERC721HAnalytics` is implemented, additionally the interface ID of `IERC721HAnalytics`
+
+#### Analytics Extension (`IERC721HAnalytics`) — OPTIONAL
+
+The following requirements apply only to contracts that implement the optional `IERC721HAnalytics` interface:
+
+A1. `isEarlyAdopter(account, blockThreshold)` MUST execute in O(n) time where n is the number of tokens created by `account`. Implementations MUST NOT iterate over global token supply.
+A2. `getEverOwnedTokensLength(account)` MUST return the length of the deduplicated per-address token list.
+A3. `getEverOwnedTokensSlice(account, start, count)` MUST return a slice of at most `count` token IDs starting at index `start`.
+A4. `getCreatedTokensLength(creator)` MUST return the length of the per-creator token list.
+A5. `getCreatedTokensSlice(creator, start, count)` MUST return a slice of at most `count` token IDs starting at index `start`.
+A6. `getOwnerAtTimestamp()` is DEPRECATED. It MUST be `pure` and MUST always return `address(0)`.
+A7. All per-address pagination functions MUST return an empty array if `start >= length`. They MUST NOT revert.
 
 ### Events
 
@@ -241,7 +261,7 @@ interface IERC721H {
 |:------|:-------------|
 | `OwnershipHistoryRecorded(uint256 tokenId, address newOwner, uint256 timestamp)` | Every mint and transfer |
 | `OriginalCreatorRecorded(uint256 tokenId, address creator)` | Once, at mint |
-| `HistoricalTokenBurned(uint256 tokenId)` | On burn (Layer 3 cleared, Layer 1 & 2 preserved) |
+| `HistoricalTokenBurned(uint256 tokenId)` | On burn (Layer 3 cleared) |
 | `Transfer(address from, address to, uint256 tokenId)` | Per ERC-721 |
 | `Approval(address owner, address approved, uint256 tokenId)` | Per ERC-721 |
 | `ApprovalForAll(address owner, address operator, bool approved)` | Per ERC-721 |
@@ -266,46 +286,71 @@ Burning a token destroys its economic value but not its historical significance.
 
 ### Why an Append-Only History Instead of a Merkle Tree?
 
-Merkle trees compress historical data but require off-chain computation to verify membership. The entire point of ERC-721H is that **other smart contracts** can query history natively. An append-only array is directly readable by any contract via `getOwnershipHistory()` without proof submission.
+Merkle trees compress historical data but require off-chain computation to verify membership. The entire point of this standard is that **other smart contracts** can query history natively. An append-only array is directly readable by any contract via `getOwnershipHistory()` without proof submission.
 
 ### Why Deduplicate `_everOwnedTokens`?
 
 Without deduplication, a token bouncing between Alice and Bob (Alice → Bob → Alice → Bob) would add the token ID to each user's list on every transfer, growing unboundedly. The `_hasOwnedToken` mapping prevents this — each address appears in a token's per-address list at most once.
 
+### Why Split Core and Analytics?
+
+The core interface (`IERC721H`) is intentionally minimal: origin tracking, O(1) membership checks, O(log n) historical resolution, and pagination. This covers the fundamental composability gap in ERC-721 — enabling other contracts to query ownership history natively.
+
+Convenience functions like `isEarlyAdopter()`, `getProvenanceReport()`, and per-address token enumeration are useful but domain-specific. Moving them to an optional `IERC721HAnalytics` extension keeps the core interface small, orthogonal, and easier to implement. Contracts signal analytics support via `supportsInterface(type(IERC721HAnalytics).interfaceId)`. Minimal interfaces have a stronger track record of adoption across the ecosystem.
+
 ### Gas Trade-offs
 
-| Operation | ERC-721 | ERC-721H | Overhead | Cause |
-|:----------|:--------|:---------|:---------|:------|
-| Mint | ~50,000 | ~332,000 | +564% | 3 layers + dual Sybil guards (EIP-1153 transient + block.number) + history arrays |
-| Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup check |
-| Burn | ~25,000–45,000 | ~10,000–25,000 | Varies | Depends on storage warmth and refund conditions; Layer 1 & 2 slots are not cleared |
-| Read | Free | Free | — | All queries are `view` |
+Reference implementation measurements (Solidity 0.8.30, optimizer enabled, 200 runs) show the following approximate overhead relative to standard ERC-721:
 
-This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the higher cost is the explicit trade-off for permanent, trustless provenance with Sybil-resistant block-number tracking.
+| Operation | Approximate Overhead | Cause |
+|:----------|:--------------------|:------|
+| Mint | ~6–7× ERC-721 | 3 layers + Sybil guards + history arrays |
+| Transfer | ~3–4× ERC-721 | 2 SSTOREs (history, block) + Sybil guards + dedup check |
+| Burn | Comparable or lower | Layer 1 & 2 slots are not cleared; varies with storage warmth |
+| Read | Free (view) | All queries are `view` |
+
+Exact costs vary with compiler version, optimizer settings, and storage warmth. This overhead is most practical on Layer 2 rollups where write costs are significantly lower. On Layer 1, the higher cost is the explicit trade-off for permanent, trustless provenance.
 
 ## Backwards Compatibility
 
-ERC-721H is **fully backwards compatible** with ERC-721. Every function defined in ERC-721 behaves identically. Wallets, marketplaces (OpenSea, Blur, Rarible), and tooling (ethers.js, viem, wagmi) that interact with ERC-721 will interact with ERC-721H tokens without modification.
+This standard is **fully backwards compatible** with [ERC-721](./eip-721.md). Every function defined in ERC-721 behaves identically. Wallets, marketplaces, and tooling that interact with ERC-721 will interact with tokens implementing this standard without modification.
 
 The historical extension is purely additive:
 - Existing ERC-721 contracts are **not** affected.
 - No changes to ERC-721 semantics are proposed.
-- Contracts that implement ERC-721H also implement ERC-721 by definition.
-- `supportsInterface(IERC721H_ID)` allows runtime detection.
+- Contracts that implement this standard also implement ERC-721 by definition.
+- `supportsInterface()` with the interface ID of `IERC721H` allows runtime detection.
 
 ### Migration Path for Existing Collections
 
-Existing ERC-721 collections cannot be retroactively upgraded to ERC-721H (storage layout differs). The recommended migration pattern is:
+Existing ERC-721 collections cannot be retroactively upgraded to comply with this standard (storage layout differs). The recommended migration pattern is:
 
-1. Deploy a new ERC-721H contract.
-2. Implement a `wrapAndMint(uint256 originalTokenId)` function that locks the ERC-721 token in the new contract and mints an ERC-721H wrapper with the caller as `originalCreator`.
+1. Deploy a new contract implementing this standard.
+2. Implement a `wrapAndMint(uint256 originalTokenId)` function that locks the ERC-721 token in the new contract and mints a wrapper token with the caller as `originalCreator`.
 3. Historical ownership prior to wrapping is not captured — document this limitation to users.
+
+## Test Cases
+
+The reference test suite (16 contracts, 423 tests) validates the following critical behaviors:
+
+- **Layer 1 invariants**: `originalCreator()` and `mintBlock()` remain immutable across transfers and burns.
+- **Layer 2 append-only**: `getOwnershipHistory()` grows on every transfer and never shrinks. `hasEverOwned()` returns `true` for all past holders.
+- **Layer 2 deduplication**: `getEverOwnedTokens()` contains each token at most once, even after round-trip transfers (A → B → A).
+- **Layer 3 compatibility**: All [ERC-721](./eip-721.md) functions (`ownerOf`, `transferFrom`, `safeTransferFrom`, `approve`, `setApprovalForAll`) behave identically to standard ERC-721.
+- **Burn preservation**: After burn, Layer 1 and Layer 2 remain queryable; Layer 3 (`ownerOf`) reverts.
+- **Sybil guard (intra-TX)**: Same token transferred twice in one transaction reverts with `TokenAlreadyTransferredThisTx()`.
+- **Sybil guard (inter-TX)**: Same token transferred twice in one block (separate transactions) reverts with `OwnerAlreadyRecordedForBlock()`.
+- **Binary search**: `getOwnerAtBlock()` resolves the correct owner at arbitrary historical blocks, including blocks where no transfer occurred.
+- **Pagination**: `getHistorySlice()`, `getEverOwnedTokensSlice()`, and `getCreatedTokensSlice()` return correct bounded slices and empty arrays for out-of-range inputs.
+- **[ERC-165](./eip-165.md)**: `supportsInterface()` returns `true` for ERC-165, ERC-721, ERC-721 Metadata, and `IERC721H` interface IDs.
+
+Test files are provided in [`../assets/eip-XXXX/test/`](../assets/eip-XXXX/test/).
 
 ## Reference Implementation
 
 A complete reference implementation is provided in:
 - [ERC-721H.sol](../assets/eip-XXXX/ERC-721H.sol) — Core contract (v2.0.0)
-- [IERC721H.sol](../assets/eip-XXXX/IERC721H.sol) — Interface (22 functions, 3 events)
+- [IERC721H.sol](../assets/eip-XXXX/IERC721H.sol) — Core interface (10 functions, 3 events) + optional analytics interface (12 functions)
 - [ERC721HStorageLib.sol](../assets/eip-XXXX/ERC721HStorageLib.sol) — Low-level storage library
 - [ERC721HCoreLib.sol](../assets/eip-XXXX/ERC721HCoreLib.sol) — High-level query library
 - [ERC721HFactory.sol](../assets/eip-XXXX/ERC721HFactory.sol) — Production factory + collection wrapper (companion, not required for EIP compliance)
@@ -458,14 +503,15 @@ function hasEverOwned(uint256 tokenId, address account) public view returns (boo
 
 ```solidity
 function supportsInterface(bytes4 interfaceId) public pure returns (bool) {
-    return interfaceId == 0x01ffc9a7                    // ERC-165
-        || interfaceId == 0x80ac58cd                    // ERC-721
-        || interfaceId == 0x5b5e139f                    // ERC-721 Metadata
-        || interfaceId == type(IERC721H).interfaceId;   // ERC-721H
+    return interfaceId == 0x01ffc9a7                                 // ERC-165
+        || interfaceId == 0x80ac58cd                                 // ERC-721
+        || interfaceId == 0x5b5e139f                                 // ERC-721 Metadata
+        || interfaceId == type(IERC721H).interfaceId                 // Core
+        || interfaceId == type(IERC721HAnalytics).interfaceId;       // Analytics (optional)
 }
 ```
 
-**Intra-TX Sybil Guard (EIP-1153 transient storage):**
+**Intra-TX Sybil Guard (transient storage, where available):**
 
 ```solidity
 modifier oneTransferPerTokenPerTx(uint256 tokenId) {
@@ -498,7 +544,7 @@ The reference implementation uses a `nonReentrant` modifier on `_transfer()` to 
 
 ### Privacy
 
-All ownership history is permanently public on-chain. Users should be aware that transferring an ERC-721H token creates an **indelible, public record** linking their address to the token. This is by design (provenance requires transparency) but may conflict with privacy expectations. Users who require privacy SHOULD use fresh addresses for each interaction.
+All ownership history is permanently public on-chain. Users should be aware that transferring a token implementing this standard creates an **indelible, public record** linking their address to the token. This is by design (provenance requires transparency) but may conflict with privacy expectations. Users who require privacy SHOULD use fresh addresses for each interaction.
 
 ### Storage Cost Griefing
 
@@ -518,4 +564,4 @@ Burning preserves Layer 1 and Layer 2 storage. This means storage slots are **no
 
 ## Copyright
 
-Copyright and related rights waived via [CC0](https://creativecommons.org/publicdomain/zero/1.0/).
+Copyright and related rights waived via [CC0](../LICENSE.md).
