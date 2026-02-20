@@ -113,6 +113,7 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 | `getOwnershipHistory(tokenId)` | `(address[], uint256[])` — owners + timestamps | Free |
 | `getTransferCount(tokenId)` | `uint256` — number of transfers | Free |
 | `getEverOwnedTokens(account)` | `uint256[]` — all tokens ever held (deduplicated) | Free |
+| `getOwnerAtTimestamp(tokenId, timestamp)` | `address` — owner at specific timestamp (Sybil-resistant) | Free |
 
 ### Layer 3 — Current Authority (ERC-721 Compatible)
 
@@ -120,10 +121,10 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 |:---------|:--------|:----|
 | `ownerOf(tokenId)` | `address` | Free |
 | `balanceOf(account)` | `uint256` | Free |
-| `transferFrom(from, to, tokenId)` | — | ~90,000 |
-| `safeTransferFrom(from, to, tokenId)` | — | ~95,000 |
-| `approve(to, tokenId)` | — | ~45,000 |
-| `setApprovalForAll(operator, approved)` | — | ~45,000 |
+| `transferFrom(from, to, tokenId)` | — | ~170,000 |
+| `safeTransferFrom(from, to, tokenId)` | — | ~173,000 |
+| `approve(to, tokenId)` | — | ~32,000 |
+| `setApprovalForAll(operator, approved)` | — | ~38,000 |
 
 ### Aggregate
 
@@ -136,20 +137,20 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 
 | Function | Behavior | Gas |
 |:---------|:---------|:----|
-| `mint(to)` | Creates token, sets all 3 layers | ~80,000 |
-| `burn(tokenId)` | Clears Layer 3, **preserves Layer 1 & 2** | ~45,000 |
+| `mint(to)` | Creates token, sets all 3 layers | ~332,000 |
+| `burn(tokenId)` | Clears Layer 3, **preserves Layer 1 & 2** | ~10,000 |
 | `transferOwnership(newOwner)` | Contract admin transfer | ~25,000 |
 
 ## Gas Overhead
 
 | Operation | ERC-721 | ERC-721H | Overhead | Why |
 |:----------|:--------|:---------|:---------|:----|
-| Mint | ~50,000 | ~80,000 | +60% | 3 extra SSTOREs (origin, history, timestamp) |
-| Transfer | ~50,000 | ~90,000 | +80% | 2 SSTOREs (history, timestamp) + 1 conditional (dedup) |
-| Burn | ~30,000 | ~45,000 | +50% | Skips refunds — Layer 1 & 2 preserved |
+| Mint | ~50,000 | ~332,000 | +564% | 3 layers + Sybil guards (transient + timestamp) + history |
+| Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup |
+| Burn | ~30,000 | ~10,000 | -67% | Skips refunds — Layer 1 & 2 preserved |
 | Read | Free | Free | — | All queries are `view` |
 
-> Acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper. On L1, this is the explicit trade-off for permanent trustless provenance.
+> Acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper. On L1, this is the explicit trade-off for permanent trustless provenance with dual Sybil protection.
 
 ## Security
 
@@ -157,6 +158,9 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 - **Access Control**: `mint()` restricted to `onlyOwner`. `burn()` restricted to token owner or approved.
 - **O(1) Lookups**: `hasEverOwned()` uses a dedicated mapping — no unbounded iteration.
 - **Deduplication**: `_everOwnedTokens` deduped via `_hasOwnedToken` — wash trading cannot bloat per-address lists.
+- **Sybil Protection (Dual-Layer)**:
+  - **Intra-TX**: `oneTransferPerTokenPerTx` modifier using EIP-1153 transient storage blocks A→B→C→D chains within one transaction
+  - **Inter-TX**: `ownerAtTimestamp` mapping enforces one owner per token per block timestamp across separate transactions
 - **ERC-165**: `supportsInterface()` returns `true` for ERC-165, ERC-721, ERC-721 Metadata, and IERC721H.
 
 ## Repository Structure
