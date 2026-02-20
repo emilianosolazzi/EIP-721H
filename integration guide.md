@@ -29,11 +29,21 @@ const current = await nft.ownerOf(tokenId);              // Layer 3 – current
 const wasFounder = await nft.hasEverOwned(tokenId, founder);  // O(1) lookup
 const minted     = await nft.getOriginallyCreatedTokens(alice);
 
+// ── Sybil Guard Query (block.number-based) ────────────
+const ownerAtBlock = await nft.getOwnerAtBlock(tokenId, blockNumber);
+// getOwnerAtTimestamp() is DEPRECATED — always returns address(0)
+
 // ── Collection Stats ──────────────────────────────────
-const supply = await nft.totalSupply();
+const active = await nft.totalSupply();   // excludes burned tokens
+const minted2 = await nft.totalMinted();  // includes burned tokens
+
+// ── Pagination (anti-griefing for large histories) ────
+const len = await nft.getHistoryLength(tokenId);
+const [slice, times] = await nft.getHistorySlice(tokenId, 0, 50);
 
 // ── Burn (preserves Layer 1 & 2) ──────────────────────
 await (await nft.burn(tokenId)).wait();
+// totalSupply() decrements; totalMinted() unchanged
 // originalCreator() and getOwnershipHistory() still return data
 ```
 
@@ -45,7 +55,8 @@ await (await nft.burn(tokenId)).wait();
  ├────────────────────────────────────────────────┤
  │  Original Creator : 0xAlic...e   (Layer 1)     │
  │  Current Owner    : 0xChar...ie  (Layer 3)     │
- │  Total Supply     : 42                         │
+ │  Total Supply     : 42  (active, excl. burned) │
+ │  Total Minted     : 45  (historical, all-time)  │
  │                                                │
  │  Ownership History (Layer 2):                  │
  │    1. 0xAlic...e   — minted                    │
@@ -72,8 +83,10 @@ await (await nft.burn(tokenId)).wait();
 | Reentrancy protection            | Varies           | Built-in (`nonReentrant`) |
 | Access-controlled mint           | Varies           | `onlyOwner`           |
 | Burn support                     | Varies           | Yes (owner/approved)  |
-| Sybil protection                 | No               | Yes (dual-layer: tstore + timestamp) |
-| `totalSupply()`                  | No (ERC-721Enum) | Yes (built-in)        |
+| Sybil protection                 | No               | Yes (dual-layer: EIP-1153 tstore + block.number) |
+| `totalSupply()` (active)         | No (ERC-721Enum) | Yes (excludes burned) |
+| `totalMinted()` (historical)     | No               | Yes (includes burned) |
+| Pagination (`getHistorySlice`)   | N/A              | Yes (anti-griefing)   |
 
 ## 4. Key ABI Snippet
 
@@ -91,6 +104,7 @@ await (await nft.burn(tokenId)).wait();
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function balanceOf(address account) view returns (uint256)",
   "function totalSupply() view returns (uint256)",
+  "function totalMinted() view returns (uint256)",
   "function tokenURI(uint256 tokenId) view returns (string)",
   "function originalCreator(uint256 tokenId) view returns (address)",
   "function mintBlock(uint256 tokenId) view returns (uint256)",
@@ -102,8 +116,14 @@ await (await nft.burn(tokenId)).wait();
   "function getEverOwnedTokens(address account) view returns (uint256[])",
   "function getOriginallyCreatedTokens(address creator) view returns (uint256[])",
   "function isEarlyAdopter(address account, uint256 blockThreshold) view returns (bool)",
-  "function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) view returns (address)",
+  "function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) view returns (address)",
+  "function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) pure returns (address)",
+  "function getHistoryLength(uint256 tokenId) view returns (uint256)",
+  "function getHistorySlice(uint256 tokenId, uint256 start, uint256 count) view returns (address[], uint256[])",
   "function getProvenanceReport(uint256 tokenId) view returns (address, uint256, address, uint256, address[], uint256[])",
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function owner() view returns (address)",
   "function transferOwnership(address newOwner) external"
 ]
 ```
