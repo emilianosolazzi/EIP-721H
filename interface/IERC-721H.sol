@@ -34,7 +34,7 @@ pragma solidity 0.8.30;
  *        bytes4(keccak256("burn(uint256)"))
  *
  * @custom:eip-status Draft
- * @custom:version 1.3.0
+ * @custom:version 1.4.0
  */
 interface IERC721H {
     // ──────────────────────────────────────────────
@@ -109,10 +109,11 @@ interface IERC721H {
     /// @notice Returns `true` if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
 
-    /// @notice Returns the recognized owner of `tokenId` at a specific `blockNumber`.
-    /// @dev Returns address(0) if no ownership was recorded at that block.
-    ///      Used for Sybil-resistant block-number-based queries.
-    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
+    /// @notice Returns the owner of `tokenId` at any arbitrary `blockNumber`.
+    /// @dev Uses O(log n) binary search over chronological ownership blocks.
+    ///      Returns the owner who held the token at `blockNumber`, even if no
+    ///      transfer happened at that exact block. Returns address(0) if the
+    ///      token was not yet minted at `blockNumber`.
     function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) external view returns (address);
 
     /// @notice DEPRECATED: Use getOwnerAtBlock() instead.
