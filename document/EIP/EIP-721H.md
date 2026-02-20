@@ -27,7 +27,7 @@ A compliant contract MUST implement ERC-721, ERC-165, and the `IERC721H` interfa
 
 ### The Problem
 
-ERC-721 stores exactly one piece of ownership data: the **current** owner. When Alice transfers Token #1 to Bob, and Bob transfers to Charlie, there is zero on-chain state proving Alice ever held the token. The only evidence lives in `Transfer` event logs, which:
+ERC-721 stores exactly one piece of ownership data: the **current** owner. When Alice transfers Token #1 to Bob, and Bob transfers to Charlie, there is no storage-level ownership record accessible to other smart contracts proving Alice ever held the token. The only evidence lives in `Transfer` event logs, which:
 
 1. **Cannot be read by other smart contracts** — `eth_getLogs` is an off-chain JSON-RPC call, not an EVM opcode.
 2. **Require off-chain indexers** — The Graph, Alchemy, or custom infrastructure must be trusted to reconstruct history.
@@ -42,7 +42,7 @@ ERC-721 stores exactly one piece of ownership data: the **current** owner. When 
 
 3. **Early Adopter Airdrops**: A protocol wants to airdrop governance tokens to everyone who held an NFT during the first 100 blocks. With ERC-721, this requires reconstructing history from logs off-chain and submitting a Merkle root — expensive, slow, and trust-dependent.
 
-4. **Legal Proof-of-Custody**: In a dispute over rightful ownership, on-chain history provides a tamper-proof chain of custody. Event logs can be dismissed as "indexer output" in legal proceedings; storage slots cannot.
+4. **Proof-of-Custody**: In a dispute over rightful ownership, on-chain storage provides a directly queryable chain of custody. Event logs require off-chain reconstruction and indexer infrastructure; storage slots are natively readable by any smart contract.
 
 5. **Gaming Veteran Status**: A game wants to show a "Day 1 Player" badge to anyone who minted during launch week, regardless of whether they still hold the token.
 
@@ -181,6 +181,8 @@ interface IERC721H {
 9. The `_everOwnedTokens` mapping MUST be deduplicated — if an address receives the same token twice (e.g., Alice → Bob → Alice), the token ID MUST appear only once in Alice's list.
 10. The contract MUST emit `OwnershipHistoryRecorded(tokenId, newOwner, timestamp)` on every mint and transfer.
 
+**Complexity Bounds:** `isEarlyAdopter(account, blockThreshold)` MUST execute in O(n) time where n is the number of tokens created by `account`. Implementations MUST NOT iterate over global token supply.
+
 #### Layer 3 — Current Authority
 
 11. Layer 3 MUST behave identically to ERC-721. `ownerOf()`, `balanceOf()`, `transferFrom()`, `safeTransferFrom()`, `approve()`, `setApprovalForAll()`, `getApproved()`, and `isApprovedForAll()` MUST comply with ERC-721.
@@ -188,8 +190,8 @@ interface IERC721H {
 #### Sybil Protection (Dual-Layer)
 
 17. Contracts SHOULD implement intra-transaction protection using EIP-1153 transient storage to block multiple transfers of the same token within one transaction (A→B→C chains).
-18. Contracts MUST implement inter-transaction protection via `_ownerAtBlock` mapping to enforce one owner per token per block number across separate transactions. `block.number` MUST be used instead of `block.timestamp` to prevent validator manipulation of ownership slots.
-19. `getOwnerAtBlock(tokenId, blockNumber)` MUST return the address recorded at that exact block number, or `address(0)` if none was recorded.
+18. Contracts SHOULD implement inter-transaction protection via `_ownerAtBlock` mapping to enforce one owner per token per block number across separate transactions. When implemented, `block.number` MUST be used instead of `block.timestamp` to prevent validator manipulation of ownership slots.
+19. `getOwnerAtBlock(tokenId, blockNumber)` MUST return the address recorded at that exact block number, or `address(0)` if none was recorded. Implementations that do not populate `_ownerAtBlock` (see requirement 18) will return `address(0)` for all queries.
 20. `getOwnerAtTimestamp(uint256, uint256)` is DEPRECATED. Implementations MUST keep it for interface backwards compatibility but it MUST be `pure` and MUST always return `address(0)`.
 21. Contracts MUST prevent self-transfers (`from == to`) to avoid polluting Layer 2 history without actual ownership change.
 
@@ -250,7 +252,7 @@ Without deduplication, a token bouncing between Alice and Bob (Alice → Bob →
 |:----------|:--------|:---------|:---------|:------|
 | Mint | ~50,000 | ~332,000 | +564% | 3 layers + dual Sybil guards (EIP-1153 transient + block.number) + history arrays |
 | Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup check |
-| Burn | ~30,000 | ~10,000 | -67% | Skips SSTORE refunds for preserved Layer 1 & 2 data |
+| Burn | ~25,000–45,000 | ~10,000–25,000 | Varies | Depends on storage warmth and refund conditions; Layer 1 & 2 slots are not cleared |
 | Read | Free | Free | — | All queries are `view` |
 
 This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the higher cost is the explicit trade-off for permanent, trustless provenance with Sybil-resistant block-number tracking.
