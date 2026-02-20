@@ -738,7 +738,13 @@ contract ERC721H_FullTest is Test {
         assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum), alice);
         // Query historical: who owned at transfer block?
         assertEq(nft.getOwnerAtBlock(tokenId, transferBlockNum), bob);
-        // Query non-existent block
-        assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum + 50), address(0));
+        // Query arbitrary block between mint and transfer — Alice still owns it
+        assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum + 50), alice);
+        // Query block after transfer — Bob owns it
+        assertEq(nft.getOwnerAtBlock(tokenId, transferBlockNum + 10), bob);
+        // Query block BEFORE mint — token didn't exist yet
+        if (mintBlockNum > 0) {
+            assertEq(nft.getOwnerAtBlock(tokenId, mintBlockNum - 1), address(0));
+        }
     }
 }
