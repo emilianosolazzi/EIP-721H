@@ -50,7 +50,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
  * - Collections <1000 tokens: Mainnet if willing to accept L1 cost
  * - High-turnover NFTs: Only deploy on L2
  * 
- * @custom:version 1.4.0
+ * @custom:version 1.5.0
  */
 contract ERC721H is IERC721H, IERC721, IERC721Metadata { 
     // ==========================================
@@ -130,13 +130,6 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     /// @notice Tokens originally created by each address (set once at mint)
     /// @dev Dedicated array avoids O(n) filtering in getOriginallyCreatedTokens()
     mapping(address => uint256[]) private _createdTokens;
-
-    /// @notice Sybil guard: enforces ONE ownership change per token per block number
-    /// @dev Prevents same-block multiple-transfer Sybil attacks (inter-TX protection).
-    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
-    ///      This is NOT for historical queries — use getOwnerAtBlock() for that.
-    ///      Complements oneTransferPerTokenPerTx (intra-TX) with inter-TX protection.
-    mapping(uint256 => mapping(uint256 => address)) private _sybilGuardBlock;
     
     // ==========================================
     // LAYER 3: CURRENT AUTHORITY (Standard ERC-721)
@@ -304,7 +297,6 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         _ownershipBlocks[tokenId].push(block.number);
         _everOwnedTokens[to].push(tokenId);
         _hasOwnedToken[tokenId][to] = true;
-        _sybilGuardBlock[tokenId][block.number] = to; // Sybil guard (inter-TX)
         emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
         
         // LAYER 3: Set current owner (standard ERC-721)
@@ -342,11 +334,15 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         // LAYER 1: originalCreator[tokenId] remains UNCHANGED (immutable!)
         
         // SYBIL GUARD: One owner per token per block number (inter-TX protection)
-        // Uses block.number (not block.timestamp) to prevent validator manipulation
-        if (_sybilGuardBlock[tokenId][block.number] != address(0)) {
-            revert OwnerAlreadyRecordedForBlock();
+        // Derived from existing _ownershipBlocks — zero additional storage.
+        // Last entry records the most recent ownership-change block; if it matches
+        // the current block, this is a same-block double-transfer → reject.
+        {
+            uint256 len = _ownershipBlocks[tokenId].length;
+            if (len > 0 && _ownershipBlocks[tokenId][len - 1] == block.number) {
+                revert OwnerAlreadyRecordedForBlock();
+            }
         }
-        _sybilGuardBlock[tokenId][block.number] = to;
 
         // LAYER 2: APPEND to ownership history (never remove old entries)
         _ownershipHistory[tokenId].push(to);
