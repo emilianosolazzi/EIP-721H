@@ -50,7 +50,7 @@ import {IERC721Metadata} from "@openzeppelin/contracts/token/ERC721/extensions/I
  * - Collections <1000 tokens: Mainnet if willing to accept L1 cost
  * - High-turnover NFTs: Only deploy on L2
  * 
- * @custom:version 1.2.0
+ * @custom:version 1.3.0
  */
 contract ERC721H is IERC721H, IERC721, IERC721Metadata { 
     // ==========================================
@@ -76,6 +76,9 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     // Events inherited from IERC721: Transfer, Approval, ApprovalForAll
     // Historical tracking events inherited from IERC721H:
     //   OwnershipHistoryRecorded, OriginalCreatorRecorded, HistoricalTokenBurned
+
+    /// @notice Emitted when contract admin ownership is transferred.
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     
     // ==========================================
     // STATE VARIABLES
@@ -252,16 +255,9 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     }
     
     // ==========================================
-    // MINTING (Sets Layer 1 & 2 & 3)
+    // SUPPLY QUERIES
     // ==========================================
-    
-    /**
-     * @notice Mint a new token with complete historical tracking
-     * @dev This is where the three-layer model is initialized:
-     *      Layer 1: originalCreator[tokenId] = to (IMMUTABLE)
-     *      Layer 2: _ownershipHistory[tokenId].push(to) (FIRST ENTRY)
-     *      Layer 3: _currentOwner[tokenId] = to (MUTABLE)
-     */
+
     /// @notice Total number of tokens currently in existence (excludes burned)
     function totalSupply() public view returns (uint256) {
         return _activeSupply;
@@ -271,11 +267,26 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     function totalMinted() public view returns (uint256) {
         return _nextTokenId - 1;
     }
+
+    // ==========================================
+    // MINTING (Sets Layer 1 & 2 & 3)
+    // ==========================================
     
+    /**
+     * @notice Mint a new token with complete historical tracking
+     * @dev This is where the three-layer model is initialized:
+     *      Layer 1: originalCreator[tokenId] = to (IMMUTABLE)
+     *      Layer 2: _ownershipHistory[tokenId].push(to) (FIRST ENTRY)
+     *      Layer 3: _currentOwner[tokenId] = to (MUTABLE)
+     * @param to The address to mint the token to (becomes originalCreator)
+     * @return tokenId The newly minted token ID
+     */
     function mint(address to) public onlyOwner returns (uint256) {
         if (to == address(0)) revert ZeroAddress();
         
         uint256 tokenId = _nextTokenId++;
+
+        _beforeTokenTransfer(address(0), to, tokenId);
         
         // LAYER 1: Record IMMUTABLE original creator
         originalCreator[tokenId] = to;
@@ -297,6 +308,8 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         _activeSupply += 1;
         
         emit Transfer(address(0), to, tokenId);
+
+        _afterTokenTransfer(address(0), to, tokenId);
         
         return tokenId;
     }
@@ -315,6 +328,8 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         if (_currentOwner[tokenId] != from) revert NotAuthorized();
         if (to == address(0)) revert ZeroAddress();
         if (from == to) revert InvalidRecipient(); // Prevent self-transfer (history pollution)
+
+        _beforeTokenTransfer(from, to, tokenId);
         
         // Clear approvals
         delete _tokenApprovals[tokenId];
@@ -344,6 +359,8 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         _balances[to] += 1;
         
         emit Transfer(from, to, tokenId);
+
+        _afterTokenTransfer(from, to, tokenId);
     }
     
     // +++++++++++++++++++++++++++++++++++++++++++++++++
@@ -449,9 +466,8 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      * @notice DEPRECATED: Use getOwnerAtBlock() instead.
      *      This function kept for backwards compatibility. Returns address(0) for all queries.
      */
-    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) public pure returns (address) {
-        timestamp; // Unused parameter
-        return address(0); // Timestamp-based queries always return empty
+    function getOwnerAtTimestamp(uint256 /* tokenId */, uint256 /* timestamp */) public pure returns (address) {
+        return address(0); // DEPRECATED: timestamp-based queries always return empty
     }
     
     // ==========================================
@@ -496,6 +512,51 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         for (uint256 i = 0; i < sliceLen; i++) {
             owners[i] = _ownershipHistory[tokenId][start + i];
             timestamps[i] = _ownershipTimestamps[tokenId][start + i];
+        }
+    }
+
+    // ==========================================
+    // PER-ADDRESS PAGINATION (Anti-Griefing)
+    // ==========================================
+
+    /// @notice Returns the number of distinct tokens `account` has ever owned.
+    /// @dev Use with getEverOwnedTokensSlice() to paginate for prolific holders.
+    function getEverOwnedTokensLength(address account) public view returns (uint256) {
+        return _everOwnedTokens[account].length;
+    }
+
+    /// @notice Returns a paginated slice of tokens `account` has ever owned.
+    function getEverOwnedTokensSlice(address account, uint256 start, uint256 count)
+        public view returns (uint256[] memory tokenIds)
+    {
+        uint256 len = _everOwnedTokens[account].length;
+        if (start >= len) return new uint256[](0);
+        uint256 end = start + count;
+        if (end > len) end = len;
+        uint256 sliceLen = end - start;
+        tokenIds = new uint256[](sliceLen);
+        for (uint256 i = 0; i < sliceLen; i++) {
+            tokenIds[i] = _everOwnedTokens[account][start + i];
+        }
+    }
+
+    /// @notice Returns the number of tokens `creator` originally minted.
+    function getCreatedTokensLength(address creator) public view returns (uint256) {
+        return _createdTokens[creator].length;
+    }
+
+    /// @notice Returns a paginated slice of tokens `creator` originally minted.
+    function getCreatedTokensSlice(address creator, uint256 start, uint256 count)
+        public view returns (uint256[] memory tokenIds)
+    {
+        uint256 len = _createdTokens[creator].length;
+        if (start >= len) return new uint256[](0);
+        uint256 end = start + count;
+        if (end > len) end = len;
+        uint256 sliceLen = end - start;
+        tokenIds = new uint256[](sliceLen);
+        for (uint256 i = 0; i < sliceLen; i++) {
+            tokenIds[i] = _createdTokens[creator][start + i];
         }
     }
 
@@ -549,9 +610,14 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      */
     function burn(uint256 tokenId) public {
         address tokenOwner = ownerOf(tokenId);
-        if (msg.sender != tokenOwner && !_isApprovedOrOwner(msg.sender, tokenId)) {
+        // Gas opt: inline auth instead of calling _isApprovedOrOwner (avoids 2nd ownerOf SLOAD)
+        if (msg.sender != tokenOwner &&
+            getApproved(tokenId) != msg.sender &&
+            !isApprovedForAll(tokenOwner, msg.sender)) {
             revert NotApprovedOrOwner();
         }
+
+        _beforeTokenTransfer(tokenOwner, address(0), tokenId);
         
         // Clear approvals only
         delete _tokenApprovals[tokenId];
@@ -566,6 +632,8 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
         
         emit Transfer(tokenOwner, address(0), tokenId);
         emit HistoricalTokenBurned(tokenId);
+
+        _afterTokenTransfer(tokenOwner, address(0), tokenId);
     }
     
     // ==========================================
@@ -574,7 +642,9 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
     
     function transferOwnership(address newOwner) public onlyOwner {
         if (newOwner == address(0)) revert ZeroAddress();
+        address previousOwner = owner;
         owner = newOwner;
+        emit OwnershipTransferred(previousOwner, newOwner);
     }
     
     // ==========================================
@@ -594,13 +664,36 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
                 getApproved(tokenId) == spender || 
                 isApprovedForAll(tokenOwner, spender));
     }
+
+    /**
+     * @notice Hook called before any token transfer (including mint and burn).
+     * @dev Override in inheriting contracts for staking, royalties, or access control.
+     *      Mint:     from == address(0)
+     *      Burn:     to   == address(0)
+     *      Transfer: both non-zero
+     * @param from     Source address (address(0) for mint)
+     * @param to       Destination address (address(0) for burn)
+     * @param tokenId  Token being transferred
+     */
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId) internal virtual {}
+
+    /**
+     * @notice Hook called after any token transfer (including mint and burn).
+     * @dev Override in inheriting contracts for post-transfer logic.
+     * @param from     Source address (address(0) for mint)
+     * @param to       Destination address (address(0) for burn)
+     * @param tokenId  Token being transferred
+     */
+    function _afterTokenTransfer(address from, address to, uint256 tokenId) internal virtual {}
     
+    /// @dev Checks ERC-721 receiver interface on contract recipients.
+    ///      Internal + virtual so inheriting contracts can override receiver logic.
     function _checkOnERC721Received(
         address from,
         address to,
         uint256 tokenId,
         bytes memory data
-    ) private {
+    ) internal virtual {
         if (to.code.length > 0) {
             try IERC721Receiver(to).onERC721Received(msg.sender, from, tokenId, data) returns (bytes4 retval) {
                 if (retval != IERC721Receiver.onERC721Received.selector) {
