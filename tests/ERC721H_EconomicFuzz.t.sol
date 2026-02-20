@@ -87,4 +87,3 @@ contract ERC721H_EconomicFuzz {
         return 5;
     }
 }
-
