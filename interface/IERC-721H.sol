@@ -34,7 +34,7 @@ pragma solidity 0.8.30;
  *        bytes4(keccak256("burn(uint256)"))
  *
  * @custom:eip-status Draft
- * @custom:version 1.4.0
+ * @custom:version 1.5.0
  */
 interface IERC721H {
     // ──────────────────────────────────────────────
