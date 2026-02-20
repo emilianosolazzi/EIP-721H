@@ -1,4 +1,4 @@
- Introducing ERC-721H: The NFT Standard with Perfect Memory
+🚀 Introducing ERC-721H: The NFT Standard with Perfect Memory
 
 After months of security research , I've identified a fundamental flaw in how NFTs handle ownership:
 
@@ -36,7 +36,8 @@ Core (ERC-721 compatible):
   safeTransferFrom(from, to, tokenId)
   approve(to, tokenId)
   setApprovalForAll(operator, approved)
-  totalSupply() → uint256
+  totalSupply() → uint256                      // active tokens (excludes burned)
+  totalMinted() → uint256                       // all-time minted (includes burned)
 
 Historical Queries (the innovation):
   isOriginalOwner(tokenId, address) → bool
@@ -47,20 +48,30 @@ Historical Queries (the innovation):
   getEverOwnedTokens(address) → tokenId[]        // deduplicated
   getOriginallyCreatedTokens(address) → tokenId[] // O(1) dedicated array
   isEarlyAdopter(address, blockThreshold) → bool
+  getOwnerAtBlock(tokenId, blockNumber) → address   // Sybil-resistant block-number query
+  getOwnerAtTimestamp(tokenId, timestamp) → address  // DEPRECATED — always returns address(0)
+  getHistoryLength(tokenId) → uint256             // for paginated reads
+  getHistorySlice(tokenId, start, count) → owners[], timestamps[]  // anti-griefing pagination
   getProvenanceReport(tokenId) → full provenance in one call
 
 Lifecycle:
-  mint(address) → tokenId        // onlyOwner, sets all 3 layers
-  burn(tokenId)                 // removes Layer 3, preserves Layer 1 & 2
-  transferOwnership(newOwner)  // contract admin transfer
+  mint(address) → tokenId                        // onlyOwner, sets all 3 layers
+  burn(tokenId)                                   // removes Layer 3, preserves Layer 1 & 2
+  transferOwnership(newOwner)                     // contract admin transfer
 
  SECURITY:
 
 - Access-controlled minting (onlyOwner)
-- Reentrancy guard on all transfers
+- Reentrancy guard on all transfers (dedicated `Reentrancy()` error — not aliased to `NotAuthorized`)
 - Zero-address validation throughout
 - History survives burn (Layer 1 & 2 are permanent)
-- Zero compiler warnings
+- `HistoricalTokenBurned` event signals Layer-3-only deletion to indexers
+- Dual Sybil Protection:
+  • Intra-TX: EIP-1153 transient storage blocks multi-transfer chains (A→B→C) within one transaction
+  • Inter-TX: ownerAtBlock mapping enforces one owner per token per block number across separate transactions (block.number, not block.timestamp, to prevent validator manipulation)
+- Self-transfer prevention (from == to reverts — blocks history pollution)
+- One compiler warning (unused parameter in deprecated getOwnerAtTimestamp — intentional)
+- `totalSupply()` excludes burned tokens; use `totalMinted()` for historical count
 
  REAL USE CASES:
 
@@ -92,16 +103,16 @@ Lifecycle:
 - Deduplicated everOwnedTokens prevents array bloat on circular transfers
 - History survives even if token is burned
 
- GAS TRADE-OFFS:
+📈 GAS TRADE-OFFS:
 
-Mint: ~80k gas (standard: ~50k) — one-time cost for permanent history
-Transfer: ~90k gas (standard: ~50k) — append to immutable record
+Mint: ~332k gas (standard: ~50k) — one-time cost for permanent history + Sybil guards
+Transfer: ~170k gas (standard: ~50k) — append to immutable record + dual Sybil protection
 Read history: FREE (view functions, O(1) lookups)
 
-Trade-off: Pay more on writes, save massively on reads. History is forever.
+Trade-off: Pay more on writes for permanent trustless provenance with Sybil resistance.
 
 
- QUESTION FOR THE COMMUNITY:
+💭 QUESTION FOR THE COMMUNITY:
 
 Should this become an ERC standard?
 
