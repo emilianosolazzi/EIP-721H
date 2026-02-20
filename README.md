@@ -7,12 +7,12 @@
 
 ## The Problem
 
-Standard ERC-721 loses all ownership history the moment a token is transferred. Once Alice sends to Bob, there is **zero on-chain proof** Alice ever held it. The only evidence lives in event logs, which:
+Standard ERC-721 loses all ownership history the moment a token is transferred. Once Alice sends to Bob, there is **no storage-level ownership record** accessible to other smart contracts. The only evidence lives in event logs, which:
 
-- Cannot be read by other smart contracts
+- Cannot be read by other smart contracts (no EVM opcode for log access)
 - Require off-chain indexers (The Graph, Alchemy) that can go down
 - Cannot power on-chain governance or airdrops
-- Are dismissed as "indexer output" in legal contexts
+- Require off-chain reconstruction for any practical use
 
 ## The Solution: Three-Layer Ownership
 
@@ -42,7 +42,7 @@ Layer 1 never changes. Layer 2 only grows. Layer 3 works exactly like ERC-721.
 | Art Provenance | Nothing — history lost | Full chain: artist → gallery → collector |
 | Founder Benefits | Minter forgotten after transfer | `isOriginalOwner()` returns `true` forever |
 | Early Adopter Airdrops | Requires off-chain Merkle proof | `isEarlyAdopter()` — one on-chain call |
-| Legal Proof-of-Custody | Event logs (fragile) | Storage slots (tamper-proof) |
+| Proof-of-Custody | Event logs (off-chain reconstruction) | Storage slots (contract-queryable) |
 | Gaming Veteran Status | Cannot prove past ownership | `hasEverOwned()` — O(1) on-chain |
 
 ## Quick Start
@@ -142,7 +142,7 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 | Function | Behavior | Gas |
 |:---------|:---------|:----|
 | `mint(to)` | Creates token, sets all 3 layers | ~332,000 |
-| `burn(tokenId)` | Clears Layer 3, **preserves Layer 1 & 2** | ~10,000 |
+| `burn(tokenId)` | Clears Layer 3, **preserves Layer 1 & 2** | ~10,000–25,000 |
 | `transferOwnership(newOwner)` | Contract admin transfer | ~25,000 |
 
 ## Gas Overhead
@@ -151,10 +151,10 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 |:----------|:--------|:---------|:---------|:----|
 | Mint | ~50,000 | ~332,000 | +564% | 3 layers + Sybil guards (EIP-1153 transient + block.number) + history |
 | Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, block) + Sybil guards + dedup |
-| Burn | ~30,000 | ~10,000 | -67% | Skips refunds — Layer 1 & 2 preserved |
+| Burn | ~30,000 | ~10,000–25,000 | -67% to -17% | Skips refunds — Layer 1 & 2 preserved; varies with storage warmth |
 | Read | Free | Free | — | All queries are `view` |
 
-> Acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper. On L1, this is the explicit trade-off for permanent trustless provenance with dual Sybil protection.
+> More suitable for rollups (Arbitrum, Base, Optimism) where write costs are significantly lower. On L1, this is the explicit trade-off for permanent trustless provenance with dual Sybil protection. Gas numbers are approximate cold-path measurements; actual costs vary with storage warmth and network conditions.
 
 ## Security
 
@@ -167,7 +167,7 @@ const isHistorical = await nft.supportsInterface(IERC721H_ID);
 - **Sybil Protection (Dual-Layer)**:
   - **Intra-TX**: `oneTransferPerTokenPerTx` modifier using EIP-1153 transient storage blocks A→B→C→D chains within one transaction
   - **Inter-TX**: `_ownerAtBlock` mapping enforces one owner per token per block number across separate transactions (`block.number`, not `block.timestamp`, to prevent validator manipulation)
-- **ERC-165**: `supportsInterface()` returns `true` for ERC-165, ERC-721, ERC-721 Metadata, and IERC721H.
+- **ERC-165**: `supportsInterface()` returns `true` for ERC-165, ERC-721, ERC-721 Metadata, and IERC721H. The ERC-721H interface ID is computed deterministically as `type(IERC721H).interfaceId` (XOR of all function selectors in the interface).
 
 ## Repository Structure
 
