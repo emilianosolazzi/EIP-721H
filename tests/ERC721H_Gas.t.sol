@@ -23,7 +23,7 @@ contract ERC721H_GasTest is Test {
 
     function test_Gas_FirstTransfer() public {
         nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         
         vm.prank(alice);
         nft.approve(bob, 1);
@@ -38,7 +38,7 @@ contract ERC721H_GasTest is Test {
     function test_Gas_SecondTransfer() public {
         // This measures a transfer after mint (in a new TX context)
         nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         
         uint256 gasBefore = gasleft();
         vm.prank(alice);
@@ -54,7 +54,7 @@ contract ERC721H_GasTest is Test {
         // multi-transfer within a single TX. In production, bob → alice would
         // happen in a separate TX. Here we measure a SINGLE transfer to a
         // repeat owner to confirm the dedup optimization (skip _everOwnedTokens push).
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         vm.prank(alice);
         nft.transferFrom(alice, bob, 1);
         
@@ -66,7 +66,7 @@ contract ERC721H_GasTest is Test {
 
     function test_Gas_SafeTransferFrom() public {
         nft.mint(alice);
-        vm.warp(block.timestamp + 1);
+        vm.roll(block.number + 1);
         
         vm.prank(alice);
         nft.approve(bob, 1);
