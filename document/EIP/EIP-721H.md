@@ -78,6 +78,9 @@ interface IERC721H {
         address indexed creator
     );
 
+    /// @notice Emitted when a token is burned (Layer 3 cleared, Layer 1 & 2 preserved).
+    event HistoricalTokenBurned(uint256 indexed tokenId);
+
     // ── Layer 1: Immutable Origin ─────────────────────
 
     /// @notice Returns the address that originally minted `tokenId`.
@@ -109,10 +112,26 @@ interface IERC721H {
 
     /// @notice Returns true if `account` minted any token at or before `blockThreshold`.
     function isEarlyAdopter(address account, uint256 blockThreshold) external view returns (bool);
-    /// @notice Returns the owner of `tokenId` at the specified block `timestamp`.
-    /// @dev Returns address(0) if no owner was recorded at that exact timestamp.
-    ///      Used for Sybil-resistant timestamp-based queries.
-    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external view returns (address);
+
+    /// @notice Returns the recognized owner of `tokenId` at a specific `blockNumber`.
+    /// @dev Returns address(0) if no ownership was recorded at that block.
+    ///      Used for Sybil-resistant block-number-based queries.
+    ///      Uses block.number (not block.timestamp) to prevent validator manipulation.
+    function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) external view returns (address);
+
+    /// @notice DEPRECATED: Use getOwnerAtBlock() instead.
+    /// @dev Always returns address(0). Kept for backwards compatibility.
+    function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) external pure returns (address);
+
+    // ── Pagination Helpers (Anti-Griefing) ────────────
+
+    /// @notice Returns the total number of entries in `tokenId`'s ownership history.
+    function getHistoryLength(uint256 tokenId) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of ownership history.
+    function getHistorySlice(uint256 tokenId, uint256 start, uint256 count)
+        external view returns (address[] memory owners, uint256[] memory timestamps);
+
     // ── Layer 3: Current Authority ────────────────────
 
     /// @notice Returns true if `account` is the current owner of `tokenId`.
@@ -131,8 +150,11 @@ interface IERC721H {
             uint256[] memory transferTimestamps
         );
 
-    /// @notice Returns the total number of tokens currently in existence.
+    /// @notice Returns the total number of tokens currently in existence (excludes burned).
     function totalSupply() external view returns (uint256);
+
+    /// @notice Returns the total number of tokens ever minted (includes burned).
+    function totalMinted() external view returns (uint256);
 
     // ── Lifecycle ─────────────────────────────────────
 
@@ -166,8 +188,10 @@ interface IERC721H {
 #### Sybil Protection (Dual-Layer)
 
 17. Contracts SHOULD implement intra-transaction protection using EIP-1153 transient storage to block multiple transfers of the same token within one transaction (A→B→C chains).
-18. Contracts MUST implement inter-transaction protection via `_ownerAtTimestamp` mapping to enforce one owner per token per block timestamp across separate transactions.
-19. `getOwnerAtTimestamp(tokenId, timestamp)` MUST return the address recorded at that exact timestamp, or `address(0)` if none was recorded.
+18. Contracts MUST implement inter-transaction protection via `_ownerAtBlock` mapping to enforce one owner per token per block number across separate transactions. `block.number` MUST be used instead of `block.timestamp` to prevent validator manipulation of ownership slots.
+19. `getOwnerAtBlock(tokenId, blockNumber)` MUST return the address recorded at that exact block number, or `address(0)` if none was recorded.
+20. `getOwnerAtTimestamp(uint256, uint256)` is DEPRECATED. Implementations MUST keep it for interface backwards compatibility but it MUST be `pure` and MUST always return `address(0)`.
+21. Contracts MUST prevent self-transfers (`from == to`) to avoid polluting Layer 2 history without actual ownership change.
 
 #### Burn Behavior
 
@@ -189,6 +213,7 @@ interface IERC721H {
 |:------|:-------------|
 | `OwnershipHistoryRecorded(uint256 tokenId, address newOwner, uint256 timestamp)` | Every mint and transfer |
 | `OriginalCreatorRecorded(uint256 tokenId, address creator)` | Once, at mint |
+| `HistoricalTokenBurned(uint256 tokenId)` | On burn (Layer 3 cleared, Layer 1 & 2 preserved) |
 | `Transfer(address from, address to, uint256 tokenId)` | Per ERC-721 |
 | `Approval(address owner, address approved, uint256 tokenId)` | Per ERC-721 |
 | `ApprovalForAll(address owner, address operator, bool approved)` | Per ERC-721 |
@@ -223,12 +248,12 @@ Without deduplication, a token bouncing between Alice and Bob (Alice → Bob →
 
 | Operation | ERC-721 | ERC-721H | Overhead | Cause |
 |:----------|:--------|:---------|:---------|:------|
-| Mint | ~50,000 | ~332,000 | +564% | 3 layers + dual Sybil guards (transient + timestamp) + history arrays |
+| Mint | ~50,000 | ~332,000 | +564% | 3 layers + dual Sybil guards (EIP-1153 transient + block.number) + history arrays |
 | Transfer | ~50,000 | ~170,000 | +240% | 2 SSTOREs (history, timestamp) + Sybil guards + dedup check |
 | Burn | ~30,000 | ~10,000 | -67% | Skips SSTORE refunds for preserved Layer 1 & 2 data |
 | Read | Free | Free | — | All queries are `view` |
 
-This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the higher cost is the explicit trade-off for permanent, trustless provenance with Sybil-resistant timestamp tracking.
+This overhead is acceptable on L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper than mainnet. On L1, the higher cost is the explicit trade-off for permanent, trustless provenance with Sybil-resistant block-number tracking.
 
 ## Backwards Compatibility
 
@@ -266,7 +291,7 @@ mapping(address => uint256[]) private _createdTokens;
 mapping(uint256 => address[]) private _ownershipHistory;
 mapping(uint256 => uint256[]) private _ownershipTimestamps;
 mapping(address => uint256[]) private _everOwnedTokens;
-mapping(uint256 => mapping(uint256 => address)) private _ownerAtTimestamp;
+mapping(uint256 => mapping(uint256 => address)) private _ownerAtBlock;
 mapping(uint256 => mapping(address => bool)) private _hasOwnedToken;
 ```
 
@@ -289,12 +314,13 @@ function mint(address to) public onlyOwner returns (uint256) {
     _ownershipTimestamps[tokenId].push(block.timestamp);
     _everOwnedTokens[to].push(tokenId);
     _hasOwnedToken[tokenId][to] = true;
-    _ownerAtTimestamp[tokenId][block.timestamp] = to;
+    _ownerAtBlock[tokenId][block.number] = to; // block.number, not block.timestamp
     emit OwnershipHistoryRecorded(tokenId, to, block.timestamp);
 
     // Layer 3: Current owner
     _currentOwner[tokenId] = to;
     _balances[to] += 1;
+    _activeSupply += 1;
     emit Transfer(address(0), to, tokenId);
 
     return tokenId;
@@ -307,16 +333,18 @@ function mint(address to) public onlyOwner returns (uint256) {
 function _transfer(address from, address to, uint256 tokenId)
     internal nonReentrant oneTransferPerTokenPerTx(tokenId)
 {
-    if (ownerOf(tokenId) != from) revert NotAuthorized();
+    if (_currentOwner[tokenId] != from) revert NotAuthorized(); // Gas opt: skip redundant ownerOf() existence check
     if (to == address(0)) revert ZeroAddress();
+    if (from == to) revert InvalidRecipient(); // Prevent self-transfer (history pollution)
 
     delete _tokenApprovals[tokenId];
 
-    // Sybil guard: one owner per token per block timestamp (inter-TX)
-    if (_ownerAtTimestamp[tokenId][block.timestamp] != address(0)) {
-        revert OwnerAlreadyRecordedForTimestamp();
+    // Sybil guard: one owner per token per block number (inter-TX)
+    // Uses block.number (not block.timestamp) to prevent validator manipulation
+    if (_ownerAtBlock[tokenId][block.number] != address(0)) {
+        revert OwnerAlreadyRecordedForBlock();
     }
-    _ownerAtTimestamp[tokenId][block.timestamp] = to;
+    _ownerAtBlock[tokenId][block.number] = to;
 
     // Layer 2: Append to history (deduplicated)
     _ownershipHistory[tokenId].push(to);
@@ -352,8 +380,10 @@ function burn(uint256 tokenId) public {
     // LAYER 3: Remove current owner
     _currentOwner[tokenId] = address(0);
     _balances[tokenOwner] -= 1;
+    _activeSupply -= 1;
 
     emit Transfer(tokenOwner, address(0), tokenId);
+    emit HistoricalTokenBurned(tokenId);
 }
 ```
 
