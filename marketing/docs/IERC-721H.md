@@ -1,10 +1,10 @@
 🚀 Introducing ERC-721H: The NFT Standard with Perfect Memory
 
-After months of security research , I've identified a fundamental flaw in how NFTs handle ownership:
+After months of security research, I've identified a fundamental limitation in how NFTs handle ownership:
 
 ❌ PROBLEM: Standard ERC-721 has amnesia
 
-When Alice transfers NFT #1 to Bob, there's NO on-chain proof Alice ever owned it.
+When Alice transfers NFT #1 to Bob, there's no **storage-level** proof Alice ever owned it — only event logs, which require off-chain indexers to reconstruct and cannot be queried trustlessly by other smart contracts.
 
 This breaks:
 - Art provenance (can't prove Beeple → Christie's chain)
@@ -94,7 +94,8 @@ Lifecycle:
 
 5. Legal / Insurance
    Need: "Prove this wallet held this NFT on a specific date"
-   Proof: getOwnershipHistory() with timestamps — immutable on-chain evidence
+   Proof: getOwnershipHistory() with timestamps — cryptographically verifiable historical record
+   Note: block timestamps are validator-influenced within bounds; not legal-grade timekeeping, but far stronger than off-chain indexer output
 
  OPTIMIZATIONS:
 
@@ -107,9 +108,13 @@ Lifecycle:
 
 Mint: ~332k gas (standard: ~50k) — one-time cost for permanent history + Sybil guards
 Transfer: ~170k gas (standard: ~50k) — append to immutable record + dual Sybil protection
-Read history: FREE (view functions, O(1) lookups)
+Read history: No on-chain gas (view functions, O(1) lookups). RPC bandwidth applies for large arrays — use pagination.
 
 Trade-off: Pay more on writes for permanent trustless provenance with Sybil resistance.
+
+ERC-721 was optimized for minimal storage and composability.
+ERC-721H deliberately trades gas efficiency for deterministic provenance and block-level Sybil resistance.
+Both are valid — different design goals for different use cases. On L2s where gas is 10–100x cheaper, the trade-off becomes negligible.
 
 
 💭 QUESTION FOR THE COMMUNITY:
