@@ -1,363 +1,196 @@
-# ERC-721H Frontend Integration Guide
+🚀 Introducing ERC-721H v2.0.0: The NFT Standard with Perfect Memory
 
-## 1. Quick Start (ethers.js v6)
+After months of security research and iterative hardening, I've built a production-ready NFT standard that solves a fundamental limitation in how NFTs handle ownership:
 
-```js
-import { ethers } from "ethers";
+❌ PROBLEM: Standard ERC-721 has amnesia
 
-const provider = new ethers.BrowserProvider(window.ethereum);
-const signer   = await provider.getSigner();
-const nft      = new ethers.Contract(NFT_ADDRESS, ERC721H_ABI, signer);
+When Alice transfers NFT #1 to Bob, there's no **storage-level** proof Alice ever owned it — only event logs, which require off-chain indexers to reconstruct and cannot be queried trustlessly by other smart contracts.
 
-// ── Mint ──────────────────────────────────────────────
-const tx = await nft.mint(await signer.getAddress());
-const receipt = await tx.wait();
+This breaks:
+- Art provenance (can't prove Beeple → Christie's chain)
+- Airdrops to early adopters (history lost after transfer)
+- Founder benefits (lose perks when you sell)
+- Legal disputes (no ownership proof for recovery)
 
-// Safe log parsing: ERC-721H emits multiple events per mint,
-// so filter by name instead of relying on index order.
-const transferEvent = receipt.logs
-  .map(log => { try { return nft.interface.parseLog(log); } catch { return null; } })
-  .find(parsed => parsed?.name === "Transfer");
-const tokenId = transferEvent.args.tokenId;        // BigInt
-console.log("Minted token", tokenId.toString());
-// NOTE: ethers v6 returns BigInt. Use .toString() for display
-// or Number(tokenId) for small collections only.
+ SOLUTION: ERC-721H with Three-Layer Architecture
 
-// ── Transfer ──────────────────────────────────────────
-await (await nft.transferFrom(alice, bob, tokenId)).wait();
-await (await nft.transferFrom(bob, charlie, tokenId)).wait();
-// History now: [alice, bob, charlie]
+Layer 1: Immutable Origin
+├─ originalCreator[tokenId] → Alice (NEVER changes)
+└─ mintBlock[tokenId] → block number at creation
 
-// ── Read Three-Layer Model ────────────────────────────
-const creator = await nft.originalCreator(tokenId);     // Layer 1 – immutable
-const [owners, timestamps] = await nft.getOwnershipHistory(tokenId); // Layer 2 – [addresses], [timestamps]
-const current = await nft.ownerOf(tokenId);              // Layer 3 – current
+Layer 2: Historical Trail  
+├─ ownershipHistory[tokenId] → [Alice, Bob, Charlie]
+├─ ownershipTimestamps[tokenId] → [t₀, t₁, t₂]
+├─ ownershipBlocks[tokenId] → [b₀, b₁, b₂]  ← O(log n) binary search
+├─ everOwnedTokens[address] → deduplicated token list
+└─ Append-only, deduplicated, timestamped
 
-// ── Provenance Check ──────────────────────────────────
-const wasFounder = await nft.hasEverOwned(tokenId, founder);  // O(1) lookup
-const minted     = await nft.getOriginallyCreatedTokens(alice);
+Layer 3: Current Authority
+└─ currentOwner[tokenId] → Charlie (standard ERC-721)
 
-// ── Historical Owner Query (any arbitrary block) ──────
-const ownerAtBlock = await nft.getOwnerAtBlock(tokenId, blockNumber);
-// O(log n) binary search — returns the owner at ANY block, not just transfer blocks.
-// Returns address(0) only if the token was not yet minted at that block.
-// UX: display "Not yet minted" for address(0) — do NOT show raw 0x000...000.
-// getOwnerAtTimestamp() is DEPRECATED — always returns address(0)
+📐 ARCHITECTURE (v2.0.0):
 
-// ── Collection Stats ──────────────────────────────────
-const active = await nft.totalSupply();   // excludes burned tokens
-const minted2 = await nft.totalMinted();  // includes burned tokens
+ERC721HFactory (CREATE2 deployer)
+  └─ deploys → ERC721HCollection (production wrapper)
+                  └─ inherits → ERC-721H.sol (core contract)
+                                  └─ uses → ERC721HStorageLib (storage, Sybil, binary search)
+                                  └─ uses → ERC721HCoreLib (provenance, analytics)
 
-// ── Pagination (anti-griefing for large histories) ────
-// PREFER getHistorySlice() over getOwnershipHistory() for scalable UIs.
-// getOwnershipHistory() returns the full array — safe for small histories,
-// but can hit RPC response limits or stall mobile wallets on heavily-traded tokens.
-const len = await nft.getHistoryLength(tokenId);
-const [slice, times] = await nft.getHistorySlice(tokenId, 0, 50);
+Libraries are `internal` → inlined at compile time → zero gas overhead.
+Factory deploys full contracts (not clones) → no delegatecall risks.
 
-// ── Per-Address Pagination (anti-griefing for prolific holders) ──
-const ownedCount = await nft.getEverOwnedTokensLength(alice);
-const ownedSlice = await nft.getEverOwnedTokensSlice(alice, 0, 50);
-const createdCount = await nft.getCreatedTokensLength(alice);
-const createdSlice = await nft.getCreatedTokensSlice(alice, 0, 50);
+ FULL API:
 
-// ── Burn (preserves Layer 1 & 2) ──────────────────────
-await (await nft.burn(tokenId)).wait();
-// totalSupply() decrements; totalMinted() unchanged
-// originalCreator() and getOwnershipHistory() still return data
-```
+Core (ERC-721 compatible):
+  balanceOf(address) → uint256
+  ownerOf(uint256) → address
+  transferFrom(from, to, tokenId)
+  safeTransferFrom(from, to, tokenId)
+  approve(to, tokenId)
+  setApprovalForAll(operator, approved)
+  totalSupply() → uint256                      // active tokens (excludes burned)
+  totalMinted() → uint256                       // all-time minted (includes burned)
 
-## 2. Demo: Frontend Panels
+Historical Queries (the innovation):
+  isOriginalOwner(tokenId, address) → bool
+  isCurrentOwner(tokenId, address) → bool
+  hasEverOwned(tokenId, address) → bool          // O(1) mapping lookup
+  getOwnershipHistory(tokenId) → owners[], timestamps[]
+  getTransferCount(tokenId) → uint256
+  getEverOwnedTokens(address) → tokenId[]        // deduplicated
+  getOriginallyCreatedTokens(address) → tokenId[] // O(1) dedicated array
+  isEarlyAdopter(address, blockThreshold) → bool
+  getOwnerAtBlock(tokenId, blockNumber) → address   // O(log n) binary search over _ownershipBlocks
+  getOwnerAtTimestamp(tokenId, timestamp) → address  // DEPRECATED — always returns address(0)
+  getProvenanceReport(tokenId) → full provenance in one call
 
-### Token Provenance Panel (Base ERC-721H)
-```
- ┌────────────────────────────────────────────────┐
- │  Token #1 – Provenance Report                  │
- ├────────────────────────────────────────────────┤
- │  Original Creator : 0xAlic...e   (Layer 1)     │
- │  Current Owner    : 0xChar...ie  (Layer 3)     │
- │  Total Supply     : 42  (active, excl. burned) │
- │  Total Minted     : 45  (historical, all-time)  │
- │                                                │
- │  Ownership History (Layer 2):                  │
- │    1. 0xAlic...e   — minted                    │
- │    2. 0xBob...b    — transfer                  │
- │    3. 0xChar...ie  — transfer                  │
- │                                                │
- │  hasEverOwned(0xBob) : true   (O(1) lookup)    │
- │  Originally Created  : [#1, #7, #12]           │
- └────────────────────────────────────────────────┘
-```
+Pagination (anti-griefing — prefer these for scalable UIs):
+  getHistoryLength(tokenId) → uint256
+  getHistorySlice(tokenId, start, count) → owners[], timestamps[]
+  getEverOwnedTokensLength(address) → uint256
+  getEverOwnedTokensSlice(address, start, count) → tokenId[]
+  getCreatedTokensLength(address) → uint256
+  getCreatedTokensSlice(address, start, count) → tokenId[]
 
-### Collection Dashboard (ERC721HCollection)
-```
- ┌────────────────────────────────────────────────┐
- │  Founders – Collection Overview                │
- ├────────────────────────────────────────────────┤
- │  Contract   : 0x1234...abcd  (CREATE2)         │
- │  Max Supply : 10,000                           │
- │  Minted     : 3,241 / 10,000                   │
- │  Mint Price : 0.01 ETH                         │
- │  Per-Wallet : 5 max                            │
- │  Public Mint: ✅ Enabled                        │
- │                                                │
- │  Batch Summary (tokens #0–#4):                 │
- │    #0  creator: 0xAlic  owner: 0xBob   txs: 3  │
- │    #1  creator: 0xAlic  owner: 0xAlic  txs: 0  │
- │    #2  creator: 0xAlic  owner: burned  txs: 1  │
- │    #3  creator: 0xCharl owner: 0xCharl txs: 0  │
- │    #4  creator: 0xDave  owner: 0xEve   txs: 2  │
- │                                                │
- │  Revenue Balance: 32.41 ETH  [Withdraw]        │
- └────────────────────────────────────────────────┘
-```
+Lifecycle:
+  mint(address) → tokenId                        // onlyOwner (virtual — overridable)
+  _mint(address) → tokenId                       // internal primitive for custom mint paths
+  burn(tokenId)                                   // removes Layer 3, preserves Layer 1 & 2
+  transferOwnership(newOwner)                     // contract admin transfer
 
-### Factory Registry Panel (ERC721HFactory)
-```
- ┌────────────────────────────────────────────────┐
- │  ERC721HFactory – Deployment Registry          │
- ├────────────────────────────────────────────────┤
- │  Total Deployed : 47 collections               │
- │                                                │
- │  My Collections (deployer: 0xAlic...e):        │
- │    1. Founders (FNDR)   — 0x1234...abcd        │
- │    2. Gems (GEM)        — 0x5678...ef01        │
- │                                                │
- │  [Deploy New Collection]                       │
- │    Name:      ___________                      │
- │    Symbol:    ___________                      │
- │    Max Supply: ___________  (0 = unlimited)    │
- │    Base URI:  ___________                      │
- │    Salt:      ___________                      │
- │                                                │
- │  Predicted Address: 0xabcd...1234              │
- │  (Same address on Arbitrum / Base / Optimism)  │
- └────────────────────────────────────────────────┘
-```
+ERC721HCollection (via ERC721HFactory):
+  batchMint(to, quantity) → tokenId[]             // owner batch mint to one address
+  batchMintTo(recipients[]) → tokenId[]           // airdrop — one token per address
+  publicMint(quantity) → tokenId[]                // payable, per-wallet limits, supply cap
+  batchTokenSummary(tokenIds[]) → summaries[]     // batch provenance (creator, block, owner, txCount)
+  batchOwnerAtBlock(tokenIds[], block) → owners[] // governance snapshot — O(log n) per token
+  batchHasEverOwned(tokenIds[], account) → bool[] // batch ownership check
+  batchOriginalCreator(tokenIds[]) → creators[]   // batch creator lookup
+  batchTransferCount(tokenIds[]) → counts[]       // batch activity metric
+  setBaseURI / setMintPrice / setMaxPerWallet / togglePublicMint / withdraw
 
-## 3. Comparison Chart
+ERC721HFactory:
+  deployCollection(name, symbol, maxSupply, baseURI, salt) → address  // CREATE2
+  predictAddress(name, symbol, maxSupply, baseURI, salt, deployer) → address
+  isCollection(address) → bool
+  getCollections(start, count) → address[]        // paginated registry
+  getDeployerCollections(deployer) → address[]
 
-> Comparison vs **minimal ERC-721** (non-enumerable). ERC-721Enumerable adds supply tracking but not provenance.
+ SECURITY:
 
-| Feature                          | ERC-721          | ERC-721H              | ERC721HCollection     |
-|:---------------------------------|:-----------------|:----------------------|:----------------------|
-| Track current owner              | Yes              | Yes                   | Yes                   |
-| Track original creator           | No               | Yes (immutable)       | Yes (immutable)       |
-| Track full ownership history     | No (events only) | Yes (on-chain array)  | Yes (on-chain array)  |
-| `hasEverOwned()` lookup          | N/A              | O(1) via mapping      | O(1) + batch          |
-| Airdrop to original minters      | No               | Yes (`getOriginallyCreatedTokens`) | Yes + `batchMintTo` |
-| Founder / early-adopter benefits | No               | Yes (survives transfer) | Yes (survives transfer) |
-| Provenance proof                 | Fragile (logs)   | Solid (native)        | Solid + batch queries |
-| History survives burn            | No               | Yes (Layer 1 & 2 persist) | Yes (Layer 1 & 2 persist) |
-| Reentrancy protection            | Varies           | Built-in (`nonReentrant`) | Inherited             |
-| Access-controlled mint           | Varies           | `onlyOwner`           | Owner + public paths  |
-| Burn support                     | Varies           | Yes (owner/approved)  | Yes (owner/approved)  |
-| Sybil protection                 | No               | Yes (dual-layer: EIP-1153 tstore + block.number) | Inherited |
-| `totalSupply()` (active)         | No (ERC-721Enum) | Yes (excludes burned) | Yes (excludes burned) |
-| `totalMinted()` (historical)     | No               | Yes (includes burned) | Yes (includes burned) |
-| Pagination (`getHistorySlice`)   | N/A              | Yes (anti-griefing)   | Yes (anti-griefing)   |
-| Supply cap (immutable)           | Manual           | No                    | Yes (`MAX_SUPPLY`)    |
-| Batch minting                    | No               | No                    | Yes (`batchMint`, `batchMintTo`) |
-| Public mint (payable)            | Manual           | No                    | Yes (price + per-wallet limits) |
-| Batch historical queries         | No               | No                    | Yes (5 batch view functions) |
-| Configurable metadata URI        | Manual           | No                    | Yes (`setBaseURI`)    |
-| Revenue withdrawal               | Manual           | No                    | Yes (`withdraw()`)    |
-| Deterministic deployment (CREATE2) | No             | No                    | Yes (via ERC721HFactory) |
+- Access-controlled minting (onlyOwner)
+- Reentrancy guard on all transfers (dedicated `Reentrancy()` error — not aliased to `NotAuthorized`)
+- Zero-address validation throughout
+- History survives burn (Layer 1 & 2 are permanent)
+- `HistoricalTokenBurned` event signals Layer-3-only deletion to indexers
+- Dual Sybil Protection:
+  • Intra-TX: EIP-1153 transient storage blocks multi-transfer chains (A→B→C) within one transaction
+  • Inter-TX: Derived from _ownershipBlocks[tokenId] — if last recorded block == block.number, reverts. No dedicated mapping needed (eliminated in v1.5.0). Uses block.number, not block.timestamp, to prevent validator manipulation.
+- O(log n) binary search: getOwnerAtBlock() resolves owner at ANY arbitrary past block, not just transfer blocks
+- Self-transfer prevention (from == to reverts — blocks history pollution)
+- One compiler warning (unused parameter in deprecated getOwnerAtTimestamp — intentional)
+- `totalSupply()` excludes burned tokens; use `totalMinted()` for historical count
+- Factory: CREATE2 with deployer-mixed salt → deterministic cross-chain addresses, front-run resistant
+- Collection: Supply cap (immutable MAX_SUPPLY), per-wallet mint limits, no ETH refund on publicMint (zero reentrancy surface)
 
-## 4. Key ABI Snippets
+ REAL USE CASES:
 
-### 4a. Base ERC-721H ABI
+1. Art NFTs
+   Query: "Who were all previous owners?"
+   Call: getProvenanceReport(tokenId)
+   Returns: creator, creation block, current owner, transfer count, full owner chain + timestamps
 
-```json
-[
-  "function mint(address to) external returns (uint256)",
-  "function burn(uint256 tokenId) external",
-  "function transferFrom(address from, address to, uint256 tokenId) external",
-  "function safeTransferFrom(address from, address to, uint256 tokenId) external",
-  "function safeTransferFrom(address from, address to, uint256 tokenId, bytes data) external",
-  "function approve(address to, uint256 tokenId) external",
-  "function setApprovalForAll(address operator, bool approved) external",
-  "function getApproved(uint256 tokenId) view returns (address)",
-  "function isApprovedForAll(address account, address operator) view returns (bool)",
-  "function ownerOf(uint256 tokenId) view returns (address)",
-  "function balanceOf(address account) view returns (uint256)",
-  "function totalSupply() view returns (uint256)",
-  "function totalMinted() view returns (uint256)",
-  "function tokenURI(uint256 tokenId) view returns (string)",
-  "function originalCreator(uint256 tokenId) view returns (address)",
-  "function mintBlock(uint256 tokenId) view returns (uint256)",
-  "function isOriginalOwner(uint256 tokenId, address account) view returns (bool)",
-  "function isCurrentOwner(uint256 tokenId, address account) view returns (bool)",
-  "function hasEverOwned(uint256 tokenId, address account) view returns (bool)",
-  "function getOwnershipHistory(uint256 tokenId) view returns (address[], uint256[])",
-  "function getTransferCount(uint256 tokenId) view returns (uint256)",
-  "function getEverOwnedTokens(address account) view returns (uint256[])",
-  "function getOriginallyCreatedTokens(address creator) view returns (uint256[])",
-  "function isEarlyAdopter(address account, uint256 blockThreshold) view returns (bool)",
-  "function getOwnerAtBlock(uint256 tokenId, uint256 blockNumber) view returns (address)",
-  "function getOwnerAtTimestamp(uint256 tokenId, uint256 timestamp) pure returns (address)",
-  "function getHistoryLength(uint256 tokenId) view returns (uint256)",
-  "function getHistorySlice(uint256 tokenId, uint256 start, uint256 count) view returns (address[], uint256[])",
-  "function getEverOwnedTokensLength(address account) view returns (uint256)",
-  "function getEverOwnedTokensSlice(address account, uint256 start, uint256 count) view returns (uint256[])",
-  "function getCreatedTokensLength(address creator) view returns (uint256)",
-  "function getCreatedTokensSlice(address creator, uint256 start, uint256 count) view returns (uint256[])",
-  "function getProvenanceReport(uint256 tokenId) view returns (address, uint256, address, uint256, address[], uint256[])",
-  "function name() view returns (string)",
-  "function symbol() view returns (string)",
-  "function owner() view returns (address)",
-  "function transferOwnership(address newOwner) external"
-]
-```
+2. DAO Governance
+   Rule: "Founding members get permanent board seats"
+   Solution: isOriginalOwner() returns true even after sale
 
-### 4b. ERC721HCollection ABI (extends Base)
+3. Gaming
+   Feature: "Veteran badge for accounts minted in Year 1"
+   Check: isEarlyAdopter(address, blockThreshold)
 
-Includes all Base ABI functions above, plus:
+4. Airdrops
+   Target: "Reward original creators, not current holders"
+   Filter: getOriginallyCreatedTokens(artist)
 
-```json
-[
-  "function MAX_SUPPLY() view returns (uint256)",
-  "function mintPrice() view returns (uint256)",
-  "function publicMintEnabled() view returns (bool)",
-  "function maxPerWallet() view returns (uint256)",
-  "function publicMintCount(address) view returns (uint256)",
-  "function batchMint(address to, uint256 quantity) external returns (uint256[])",
-  "function batchMintTo(address[] recipients) external returns (uint256[])",
-  "function publicMint(uint256 quantity) payable returns (uint256[])",
-  "function batchTokenSummary(uint256[] tokenIds) view returns (tuple(uint256 tokenId, address creator, uint256 creationBlock, address currentOwner, uint256 transferCount)[])",
-  "function batchOwnerAtBlock(uint256[] tokenIds, uint256 blockNumber) view returns (address[])",
-  "function batchHasEverOwned(uint256[] tokenIds, address account) view returns (bool[])",
-  "function batchOriginalCreator(uint256[] tokenIds) view returns (address[])",
-  "function batchTransferCount(uint256[] tokenIds) view returns (uint256[])",
-  "function setBaseURI(string newBaseURI) external",
-  "function setMintPrice(uint256 newPrice) external",
-  "function setMaxPerWallet(uint256 newMax) external",
-  "function togglePublicMint() external",
-  "function withdraw() external"
-]
-```
+5. Legal / Insurance
+   Need: "Prove this wallet held this NFT on a specific date"
+   Proof: getOwnershipHistory() with timestamps — cryptographically verifiable historical record
+   Note: block timestamps are validator-influenced within bounds; not legal-grade timekeeping, but far stronger than off-chain indexer output
 
-### 4c. ERC721HFactory ABI
+ OPTIMIZATIONS:
 
-```json
-[
-  "function deployCollection(string name_, string symbol_, uint256 maxSupply_, string baseURI_, bytes32 salt) external returns (address)",
-  "function predictAddress(string name_, string symbol_, uint256 maxSupply_, string baseURI_, bytes32 salt, address deployer) view returns (address)",
-  "function isCollection(address) view returns (bool)",
-  "function totalDeployed() view returns (uint256)",
-  "function getCollections(uint256 start, uint256 count) view returns (address[])",
-  "function getDeployerCollections(address deployer) view returns (address[])",
-  "function getCollectionCount() view returns (uint256)",
-  "event CollectionDeployed(address indexed collection, address indexed deployer, string name, string symbol, uint256 maxSupply, bytes32 salt)"
-]
-```
+- O(1) hasEverOwned() via dedicated mapping (was O(n) linear scan)
+- O(1) getOriginallyCreatedTokens() via dedicated array (was O(n²) double-pass filter)
+- O(log n) getOwnerAtBlock() via binary search over _ownershipBlocks (was sparse mapping)
+- Sybil guard derived from existing data — zero extra storage (eliminated _ownerAtBlock mapping)
+- Deduplicated everOwnedTokens prevents array bloat on circular transfers
+- Per-address pagination (getEverOwnedTokensSlice, getCreatedTokensSlice) — anti-griefing for prolific holders
+- History survives even if token is burned
+- Library architecture: all internal functions inlined at compile time — zero runtime overhead
+- Batch minting amortizes 21k TX base cost across N mints
+- 5 batch query functions — one RPC call instead of N
 
-## 5. Gas Estimates
+📈 GAS TRADE-OFFS:
 
-### Base ERC-721H
+Base ERC-721H:
+  Mint: ~332k gas (standard: ~50k) — one-time cost for permanent history + Sybil guards
+  Transfer: ~170k gas (standard: ~50k) — append to immutable record + dual Sybil protection
+  Read history: Free (view functions, O(1) lookups). RPC bandwidth applies — use pagination.
 
-| Operation  | ERC-721   | ERC-721H  | Overhead |
-|:-----------|:----------|:----------|:---------|
-| Mint       | ~50,000   | ~332,000  | +564%    |
-| Transfer   | ~50,000   | ~170,000  | +240%    |
-| Burn       | ~30,000   | ~10,000   | -67%     |
-| Read history | Free    | Free      | —        |
+ERC721HCollection (batch):
+  batchMint(10): ~3.2M gas — amortizes TX base cost across 10 mints
+  publicMint(3): ~1M gas — includes payment + wallet limit checks
+  Batch queries: Free — 5 provenance lookups in one RPC call
+  Factory deploy: ~4.5M gas — full CREATE2 deploy (pennies on L2)
 
-### ERC721HCollection (batch operations)
+Trade-off: Pay more on writes for permanent trustless provenance with Sybil resistance.
 
-| Operation               | Gas (approx)            | Notes                                |
-|:------------------------|:------------------------|:-------------------------------------|
-| `batchMint(to, 10)`     | ~3,200,000              | Amortizes 21k TX base across 10 mints |
-| `batchMintTo(10 addrs)` | ~3,200,000              | Same as batchMint, different recipients |
-| `publicMint(3)`         | ~1,000,000              | Includes payment + wallet limit checks |
-| `batchTokenSummary(5)`  | Free (view)             | 5 provenance lookups in one RPC call |
-| `batchOwnerAtBlock(5)`  | Free (view)             | 5 × O(log n) binary searches         |
-| `batchHasEverOwned(5)`  | Free (view)             | 5 × O(1) mapping lookups             |
-| Factory `deployCollection` | ~4,500,000           | Full CREATE2 deploy (pennies on L2)  |
+ERC-721 was optimized for minimal storage and composability.
+ERC-721H deliberately trades gas efficiency for deterministic provenance and block-level Sybil resistance.
+Both are valid — different design goals for different use cases.
+On L2s (Arbitrum, Base, Optimism) where gas is 10–100x cheaper, batch minting 10 tokens costs < $0.10.
 
-> **Trade-off**: Higher write gas for permanent on-chain provenance with dual Sybil protection.
->
-> Gas numbers are approximate cold-path measurements. Actual costs vary with storage warmth, approval state, and L1 vs L2.
-> On L2 (Arbitrum/Base/Optimism), batch minting 10 tokens costs < $0.10.
 
-## 6. Same-Block Transfer Limit
+ PRODUCTION-READY:
 
-⚠️ The dual Sybil guard enforces **one transfer per token per block** (and one per transaction).
+v2.0.0 ships with a turnkey factory:
+1. Deploy factory once per chain
+2. Anyone calls deployCollection() with CREATE2 — deterministic address on every EVM chain
+3. Configure: setMintPrice, setMaxPerWallet, togglePublicMint
+4. Users call publicMint(); owner can batchMint/batchMintTo for airdrops
+5. 5 batch historical query functions for governance snapshots, provenance dashboards
+6. withdraw() sends all revenue to owner
 
-If a user tries to transfer a token that already moved in the current block, the transaction reverts with `OwnerAlreadyRecordedForBlock()`.
+423 tests passing. Zero compiler warnings on new code. Library architecture auditable in isolation.
 
-**Frontend handling:**
-```js
-try {
-  await (await nft.transferFrom(from, to, tokenId)).wait();
-} catch (err) {
-  if (err.message.includes("OwnerAlreadyRecordedForBlock")) {
-    alert("This token was already transferred this block. Please retry next block.");
-  }
-}
-```
+💭 QUESTION FOR THE COMMUNITY:
 
-Marketplaces should surface a friendly message — this is intentional Sybil protection, not a bug.
+Should this become an ERC standard?
 
-## 7. ERC721HCollection Error Handling
+Imagine a world where every NFT platform preserves complete ownership history by default. No more relying on fragile off-chain indexers. No more lost provenance. Deploy one factory, launch collections across every L2 at the same address.
 
-The Collection adds its own revert reasons on top of the base ERC-721H errors:
+Blockchain was built for immutability. Let's use it properly.
 
-```js
-try {
-  await (await collection.publicMint(3, { value: ethers.parseEther("0.01") })).wait();
-} catch (err) {
-  const msg = err.message;
-  if (msg.includes("PublicMintDisabled"))    alert("Public minting is not open yet.");
-  if (msg.includes("InsufficientPayment"))   alert("Not enough ETH — check mint price.");
-  if (msg.includes("MaxSupplyExceeded"))     alert("Collection is sold out.");
-  if (msg.includes("MaxPerWalletExceeded"))  alert("Wallet limit reached.");
-  if (msg.includes("QuantityZero"))          alert("Must mint at least 1.");
-}
-```
+Thoughts? 
 
-## 8. Indexer Integration
-
-Unlike standard ERC-721, ERC-721H does **not** require off-chain indexers to reconstruct ownership history:
-
-| Capability | ERC-721 | ERC-721H | ERC721HCollection |
-|:-----------|:--------|:---------|:-------------------|
-| Current owner | On-chain | On-chain | On-chain |
-| Full ownership history | Requires indexer (The Graph, Alchemy) | On-chain (`getOwnershipHistory`) | On-chain (inherited) |
-| "Has ever owned?" check | Requires indexer | On-chain O(1) (`hasEverOwned`) | O(1) + batch (`batchHasEverOwned`) |
-| Original minter | Requires indexer | On-chain (`originalCreator`) | On-chain + batch (`batchOriginalCreator`) |
-| Governance snapshot | Requires indexer | On-chain (`getOwnerAtBlock`) | Batch (`batchOwnerAtBlock`) |
-| Provenance summary | Requires indexer | `getProvenanceReport` | Batch (`batchTokenSummary`) |
-
-Subgraphs become **optional** — useful for caching and UI performance, but no longer mandatory for correctness. The source of truth lives in contract storage, not event logs.
-
-## 9. Architecture: v2.0.0 Library Pattern
-
-ERC-721H v2.0.0 uses a two-library architecture for composability:
-
-```
-┌─────────────────────────────────────────────────────┐
-│  ERC721HCollection (production wrapper)              │
-│    ↕ inherits                                       │
-│  ERC-721H.sol (core contract)                       │
-│    ↕ uses                                           │
-│  ERC721HStorageLib  (low-level: storage, Sybil,     │
-│                      binary search, pagination)     │
-│  ERC721HCoreLib     (high-level: provenance report, │
-│                      transfer count, early adopter) │
-└─────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────┐
-│  ERC721HFactory (permissionless CREATE2 deployer)    │
-│    → deploys → ERC721HCollection instances           │
-│    → registry: isCollection, getCollections,         │
-│                getDeployerCollections                │
-│    → predictAddress for cross-chain coordination     │
-└─────────────────────────────────────────────────────┘
-```
-
-**Key design decisions:**
-- `_mint()` is `internal` — subclasses (like ERC721HCollection) build custom mint paths on top
-- `mint()` is `virtual` — inheritors can override with supply caps, allowlists, etc.
-- Libraries use `internal` functions → inlined at compile time, zero external call overhead
-- Factory uses full deploys (not clones) → no delegatecall risks, no initializer footguns
+#Solidity #Web3 #NFT #Blockchain #Ethereum #SmartContracts #ERC721 #L2 #CREATE2
