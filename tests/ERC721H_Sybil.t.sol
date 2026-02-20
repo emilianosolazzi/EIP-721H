@@ -86,8 +86,8 @@ contract ERC721H_SybilTest is Test {
         // Mint token #1 to the attacker contract
         nft.mint(address(attacker));
 
-        // Advance timestamp so transfers don't collide with mint's ownerAtTimestamp
-        vm.warp(block.timestamp + 1);
+        // Advance block number so transfers don't collide with mint's ownerAtBlock
+        vm.roll(block.number + 1);
     }
 
     /// @notice Proves that the Sybil chain is now BLOCKED by transient storage guard
@@ -126,8 +126,8 @@ contract ERC721H_SybilTest is Test {
         address bob = makeAddr("bob");
         nft.mint(alice); // token #2
 
-        // Advance past mint timestamp
-        vm.warp(block.timestamp + 1);
+        // Advance past mint block number
+        vm.roll(block.number + 1);
 
         // Transfer token #1 (attacker → relayB)
         vm.prank(address(attacker));
