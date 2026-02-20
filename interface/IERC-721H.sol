@@ -34,7 +34,7 @@ pragma solidity 0.8.30;
  *        bytes4(keccak256("burn(uint256)"))
  *
  * @custom:eip-status Draft
- * @custom:version 1.0.0
+ * @custom:version 1.3.0
  */
 interface IERC721H {
     // ──────────────────────────────────────────────
@@ -141,6 +141,24 @@ interface IERC721H {
     /// @return timestamps Parallel slice of block timestamps.
     function getHistorySlice(uint256 tokenId, uint256 start, uint256 count)
         external view returns (address[] memory owners, uint256[] memory timestamps);
+
+    // ──────────────────────────────────────────────
+    //  Per-Address Pagination (Anti-Griefing)
+    // ──────────────────────────────────────────────
+
+    /// @notice Returns the number of distinct tokens `account` has ever owned.
+    function getEverOwnedTokensLength(address account) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of tokens `account` has ever owned.
+    function getEverOwnedTokensSlice(address account, uint256 start, uint256 count)
+        external view returns (uint256[] memory tokenIds);
+
+    /// @notice Returns the number of tokens `creator` originally minted.
+    function getCreatedTokensLength(address creator) external view returns (uint256);
+
+    /// @notice Returns a paginated slice of tokens `creator` originally minted.
+    function getCreatedTokensSlice(address creator, uint256 start, uint256 count)
+        external view returns (uint256[] memory tokenIds);
 
     // ──────────────────────────────────────────────
     //  Aggregate Queries
