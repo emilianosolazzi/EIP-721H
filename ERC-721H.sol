@@ -260,7 +260,15 @@ contract ERC721H is IERC721H, IERC721, IERC721Metadata {
      * @param to The address to mint the token to (becomes originalCreator)
      * @return tokenId The newly minted token ID
      */
-    function mint(address to) public onlyOwner returns (uint256) {
+    function mint(address to) public virtual onlyOwner returns (uint256) {
+        return _mint(to);
+    }
+
+    /// @notice Internal mint — initializes all 3 layers. No access control.
+    /// @dev Callers MUST enforce authorization before calling.
+    ///      Safe for inheriting contracts to build custom mint paths
+    ///      (batch, public, allowlist) on top of this primitive.
+    function _mint(address to) internal returns (uint256) {
         if (to == address(0)) revert ZeroAddress();
         
         uint256 tokenId = _nextTokenId++;
