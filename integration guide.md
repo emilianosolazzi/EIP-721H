@@ -11,9 +11,17 @@ const nft      = new ethers.Contract(NFT_ADDRESS, ERC721H_ABI, signer);
 
 // ── Mint ──────────────────────────────────────────────
 const tx = await nft.mint(await signer.getAddress());
-const rc = await tx.wait();
-const tokenId = rc.logs[0].args.tokenId;          // BigInt
+const receipt = await tx.wait();
+
+// Safe log parsing: ERC-721H emits multiple events per mint,
+// so filter by name instead of relying on index order.
+const transferEvent = receipt.logs
+  .map(log => { try { return nft.interface.parseLog(log); } catch { return null; } })
+  .find(parsed => parsed?.name === "Transfer");
+const tokenId = transferEvent.args.tokenId;        // BigInt
 console.log("Minted token", tokenId.toString());
+// NOTE: ethers v6 returns BigInt. Use .toString() for display
+// or Number(tokenId) for small collections only.
 
 // ── Transfer ──────────────────────────────────────────
 await (await nft.transferFrom(alice, bob, tokenId)).wait();
@@ -31,6 +39,8 @@ const minted     = await nft.getOriginallyCreatedTokens(alice);
 
 // ── Sybil Guard Query (block.number-based) ────────────
 const ownerAtBlock = await nft.getOwnerAtBlock(tokenId, blockNumber);
+// Returns address(0) if no ownership recorded at that block.
+// UX: display "No owner recorded" — do NOT show raw 0x000...000.
 // getOwnerAtTimestamp() is DEPRECATED — always returns address(0)
 
 // ── Collection Stats ──────────────────────────────────
@@ -38,6 +48,9 @@ const active = await nft.totalSupply();   // excludes burned tokens
 const minted2 = await nft.totalMinted();  // includes burned tokens
 
 // ── Pagination (anti-griefing for large histories) ────
+// PREFER getHistorySlice() over getOwnershipHistory() for scalable UIs.
+// getOwnershipHistory() returns the full array — safe for small histories,
+// but can hit RPC response limits or stall mobile wallets on heavily-traded tokens.
 const len = await nft.getHistoryLength(tokenId);
 const [slice, times] = await nft.getHistorySlice(tokenId, 0, 50);
 
@@ -69,6 +82,8 @@ await (await nft.burn(tokenId)).wait();
 ```
 
 ## 3. Comparison Chart
+
+> Comparison vs **minimal ERC-721** (non-enumerable). ERC-721Enumerable adds supply tracking but not provenance.
 
 | Feature                          | ERC-721          | ERC-721H              |
 |:---------------------------------|:-----------------|:----------------------|
@@ -138,3 +153,37 @@ await (await nft.burn(tokenId)).wait();
 | Read history | Free    | Free      | —        |
 
 > **Trade-off**: Higher write gas for permanent on-chain provenance with dual Sybil protection.
+>
+> Gas numbers are approximate cold-path measurements. Actual costs vary with storage warmth, approval state, and L1 vs L2.
+
+## 6. Same-Block Transfer Limit
+
+⚠️ The dual Sybil guard enforces **one transfer per token per block** (and one per transaction).
+
+If a user tries to transfer a token that already moved in the current block, the transaction reverts with `OwnerAlreadyRecordedForBlock()`.
+
+**Frontend handling:**
+```js
+try {
+  await (await nft.transferFrom(from, to, tokenId)).wait();
+} catch (err) {
+  if (err.message.includes("OwnerAlreadyRecordedForBlock")) {
+    alert("This token was already transferred this block. Please retry next block.");
+  }
+}
+```
+
+Marketplaces should surface a friendly message — this is intentional Sybil protection, not a bug.
+
+## 7. Indexer Integration
+
+Unlike standard ERC-721, ERC-721H does **not** require off-chain indexers to reconstruct ownership history:
+
+| Capability | ERC-721 | ERC-721H |
+|:-----------|:--------|:---------|
+| Current owner | On-chain | On-chain |
+| Full ownership history | Requires indexer (The Graph, Alchemy) | On-chain (`getOwnershipHistory`) |
+| "Has ever owned?" check | Requires indexer | On-chain O(1) (`hasEverOwned`) |
+| Original minter | Requires indexer | On-chain (`originalCreator`) |
+
+Subgraphs become **optional** — useful for caching and UI performance, but no longer mandatory for correctness. The source of truth lives in contract storage, not event logs.
